@@ -1,0 +1,20 @@
+Subject invariants:
+The same man remains present throughout the entire video. His face, short dark hair, dark jacket and the large rifle he is holding remain unchanged.
+
+Opening state:
+At the beginning, he lies in position behind his rifle aiming past a stone balustrade, calm and focused, exactly as shown in the first image.
+
+Motion trajectory:
+He keeps aiming steadily. Gradually his expression tightens with strain and emotion; his brow furrows, his eyes narrow, and his head shifts slightly forward against the rifle stock.
+
+Camera:
+The camera remains static. No cut, no change of lens, no sudden reframing.
+
+Scene continuity:
+The stone balustrade in the foreground, the rifle, the orange juice carton on the ledge and the dim blue-grey lighting remain stable.
+
+Ending state:
+The final frame naturally matches the supplied last image without a sudden speed-up or abrupt morph.
+
+Audio:
+Only subtle wind and distant rooftop ambience; no speech and no music.

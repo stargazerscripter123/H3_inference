@@ -1,0 +1,44 @@
+# 本仓库是公开的。任何密钥/令牌都不要放进工作区,更不要提交。
+credentials/
+*.token
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+
+# 不使用也不分发未授权的真实可识别人物影像。基准素材一律用可商用授权的公开片源
+# (本仓库的示例提示词取自 Tears of Steel, CC-BY)。
+data/
+
+# 权重与第三方源码:仓库根就是项目根,ComfyUI 与权重都装在这里,但都不入库。
+# 权重最小集 40.28 GiB,用 install/download_models.sh 获取。
+ComfyUI/
+loras/
+models/
+models_*/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+
+# 运行时状态与产物
+inputs/*
+!inputs/.gitkeep
+outputs/
+logs/
+run/
+*.mp4
+*.mov
+*.webm
+*.wav
+
+# 杂项
+__pycache__/
+*.py[cod]
+.DS_Store
+.claude/
+*.orig
+*.bak
