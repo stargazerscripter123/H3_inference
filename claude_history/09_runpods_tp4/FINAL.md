@@ -41,3 +41,10 @@ pod 重建:`scripts/setup_runpods.sh`(Mac 项目内)+ 把 scripts/ 推上去。
   `_build_text_encoder_group` 断言 `cpu_group is not None` 崩 —— 已在 switch
   脚本里固定为 `${H3_TE_TP:-4}`,但上游这个报错很不友好,值得给 PR 提一句。
 - Cache-DiT / torch.compile 未开(按 note 建议先不扩大 correctness 面)。
+
+## 增补(2026-08-09 夜):BF16 基座格失败 = 引擎 30 秒超时,不是能力上限
+用户的 eval sweep 在 runpods 上 `vllm-bf16-original-tp4` 与 `-tp2u2` 两格
+返回 500(103 字节错误 JSON)。根因是 vllm-omni 写死的
+`_ASYNC_OUTPUT_TIMEOUT = 30.0`(`diffusion_engine.py:58`),不是显存/模型/配置问题
+—— 同一 pod 上 FP8 基座 NFE11 与全部 Turbo NFE6 格都正常。详见
+`../06_infra/FINAL.md` 同日增补。**结论文字里不要写成"4×5090 跑不了 BF16 基座"。**

@@ -41,6 +41,7 @@ inputs/*
 workflows/*
 !workflows/.gitkeep
 !workflows/stage_a/
+!workflows/smoke_prompt.txt
 gallery/media/
 
 # 媒体产物(gallery/index.html 引用的文件不入库,见 gallery 说明)

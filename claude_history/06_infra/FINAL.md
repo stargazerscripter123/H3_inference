@@ -89,3 +89,28 @@
     权重 patch 随缓存的 MODEL 带下去 —— 别把"日志只出现 1 次"误判为 LoRA 失效;
     用采样器的 per-step 日志计数交叉验证。另: ComfyUI 是 steps==forwards,
     与引擎侧 `num_inference_steps=NFE+1` 不同,两边都由 `--nfe` 统一表述。
+
+## 增补(2026-08-09 夜, 引擎级 30 秒硬超时 —— 三台机器通用)
+
+**`vllm_omni/diffusion/diffusion_engine.py:58` 有一个写死的
+`_ASYNC_OUTPUT_TIMEOUT = 30.0`**,在 `step_streaming`(同文件 :326)里作为
+"等引擎吐下一个输出"的上限。超时后抛 `TimeoutError`,经
+`inline_stage_diffusion_client.py` 包成 HTTP 500,body 是**一句没有内容的**
+`{"error":{"message":"Video generation failed:"}}`。
+
+- 三台机器(5090 / 6000a / runpods)的 vllm-omni 源码里都是 30.0 —— **不是某台机器配错**。
+  它与 `VLLM_OMNI_VIDEO_SYNC_TIMEOUT`(我们设 1800)是两回事,后者管不到它。
+- 实测表现(runpods,2026-08-09 eval sweep):FP8 基座 NFE11(~28s)过、
+  Turbo NFE6(~21s)过、**BF16 基座 NFE11(~30s 出头)必挂**,两种拓扑都挂。
+- 未解矛盾(如实记录):5090 的 `vllm-fp8-original-tp2` 实测 ~47s 却能过 ——
+  说明这 30 秒卡的是两次 yield 之间的间隔而非整次请求,不同拓扑下分段节奏不同。
+  想彻底钉死机制需要再挖 `step_streaming` 的 yield 粒度。
+- 处置:editable 安装,直接把 58 行改大(如 600.0)后重启引擎即可;
+  改动属于本地 patch,升级/reset 源码后要重打。
+
+**两条通用教训**
+1. **"500 + 空 message" 一律去读服务端 traceback**,不要从客户端错误反推。
+   这次客户端只给了 `Video generation failed:`,真因在服务端日志里写得清清楚楚。
+2. **别把引擎的等待上限当成硬件/模型的能力上限**。差点把"4×5090 跑不了 BF16 基座"
+   写进结论 —— 实际它只是比 30 秒慢了一点点。benchmark 表里凡是"失败"格,
+   都要先分清是 *跑不动* 还是 *被超时掐掉*。
