@@ -24,6 +24,7 @@
 | `test_h3_switch_5090.sh` | switch 脚本的决策表单测（`H3_SWITCH_LIB=1` source 取函数并 stub 掉启动）。逻辑通用，常量是 5090 的 |
 | `pr5910_resident_stride_fix.patch` | **必打**。vllm-omni PR#5910 的 `PinnedResidentLayerGroup.load()` 丢 stride，不打会让 FP8+DLO 静默产出纯噪声 |
 | `extract_frames.sh` | 从源视频抽首尾帧对（间隔 123 帧 @24fps，cover+crop） |
+| `check_repo_clean.sh` | **推送前必跑**。扫将要提交的内容：密钥 / 红线素材 / 媒体权重，三项必须全 0，否则 exit 1。仓库是公开的 |
 
 ## 三、产线控制（机器专属：三套互不兼容的 CLI 契约，Phase 2 合一）
 

@@ -28,13 +28,24 @@
 
 ## 二、清洗门禁(仓库公开,每次新增内容前都要跑)
 
+`bash scripts/check_repo_clean.sh` —— 三项全 0 才 exit 0。等价的裸命令:
+
 ```bash
-git ls-files | xargs grep -lE 'hf_[A-Za-z0-9]{20}|ghp_[A-Za-z0-9]{20}|sk-or-v1-|sk-ant-|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY'
+git ls-files | xargs grep -nE \
+  '(hf|ghp|gho|ghs|github_pat)_[A-Za-z0-9]{16,}|sk-or-v1-[a-f0-9]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY'
 git ls-files | grep -i <红线素材文件名>
 git ls-files | grep -E '\.(mp4|safetensors|pt|bin)$'
 ```
 
-基线:三项全部 **0 命中**。`credentials/` 里有三个明文有效 token
+基线:三项全部 **0 命中**。
+
+⚠️ 密钥正则必须写成"**前缀 + 至少 16 位随机体**",不能只匹配裸前缀。
+最初写的版本含 `sk-or-v1-` 这样的裸前缀,结果**本文件记录门禁命令的这一行自己就会
+命中**,门禁永远报 1 —— 一个恒假警报的门禁比没有门禁更危险,因为它训练人去忽略它。
+(2026-08-09 实际踩到:那次命中经逐行核对确认是本文件自匹配,无真实泄漏。)
+门禁本身要有反向对照 —— 塞一个假 token 进去确认它会响,否则"全 0"可能只是正则失效。
+
+`credentials/` 里有三个明文有效 token
 (HF / GitHub / OpenRouter),它们躺在 Dropbox 同步目录里 —— **建议全部轮换**。
 
 推送凭据用一次性 tokenized URL,不写进 `.git/config`:
