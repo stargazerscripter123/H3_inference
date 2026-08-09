@@ -52,27 +52,34 @@ def schedule_sha256(sigmas: list[float]) -> str:
     return hashlib.sha256(",".join(f"{s:.9f}" for s in sigmas).encode()).hexdigest()[:16]
 
 
+def checkout_label(path: str, marker: str, fallback: str) -> str:
+    """把 .../src/<checkout>/<marker>/... 里的 <checkout> 取出来当标签。
+    一台机器上常同时存在多个 checkout(如 sglang 与 sglang-pr33681),标签用来区分。"""
+    head = path.split(os.sep + marker + os.sep)[0]
+    return os.path.basename(head) or fallback
+
+
 def main():
+    # 多个 checkout 全部参测,而不是挑一个:同机上"打了补丁的"与"没打补丁的"两份
+    # 并存是常态,只测其中一份等于放过另一份。
+    engines = {}
     vllm_hits = [p for g in VLLM_GLOBS for p in sorted(glob.glob(g))]
     if not vllm_hits:
         print("找不到 vllm-omni 的 time_request.py。设 H3_SRC_ROOT 指向引擎源码根"
               "(或 H3_ROOT 指向项目根);已搜索:\n  " + "\n  ".join(VLLM_GLOBS),
               file=sys.stderr)
         return 1
-    vllm_file = vllm_hits[0]
-    if len(vllm_hits) > 1:
-        print(f"[note] vllm-omni 命中 {len(vllm_hits)} 处,用 {vllm_file}", file=sys.stderr)
-    engines = {
-        "vllm-omni": load_module(vllm_file, "vllm_tr").minimax_h3_time_shift_sigmas,
-    }
+    for i, p in enumerate(vllm_hits):
+        label = checkout_label(p, "vllm_omni", "vllm-omni")
+        engines[label] = load_module(p, f"vllm_tr{i}").minimax_h3_time_shift_sigmas
     # SGLang 是可选的:不是每台机器都装(如 runpods 只有 vLLM),缺了就少测一路,不算失败
     sglang_hits = [p for g in SGLANG_GLOBS for p in sorted(glob.glob(g, recursive=True))]
-    if len(sglang_hits) == 1:
-        engines["sglang"] = load_module(sglang_hits[0], "sgl_tr").minimax_h3_time_shift_sigmas
-    elif len(sglang_hits) > 1:
-        print(f"[warn] sglang time_request.py 命中多个,跳过: {sglang_hits}", file=sys.stderr)
-    else:
+    for i, p in enumerate(sglang_hits):
+        label = checkout_label(p, os.path.join("python", "sglang"), "sglang")
+        engines[label] = load_module(p, f"sgl_tr{i}").minimax_h3_time_shift_sigmas
+    if not sglang_hits:
         print("[note] 本机未装 sglang,只比对 vllm-omni 与作者公式", file=sys.stderr)
+    print(f"[note] 参测引擎 checkout: {', '.join(engines)}", file=sys.stderr)
     failures = 0
     for nfe in (4, 6, 8):
         for label, shift in (("video", 12.0), ("audio", 3.0)):

@@ -68,7 +68,8 @@ scripts/        全部代码(编排 CLI + 各机产线脚本 + 工具与测试)
 doc/            方案分析与 benchmark 全表
 claude_history/ 实验档案(每个主题一份 FINAL.md 权威结论)
 gallery/        对比展示页(媒体文件不入库)
-inputs/ workflows/   运行时素材目录(内容不入库)
+workflows/stage_a/   基准提示词 7 则(ToS 场景),归档 benchmark 的原始输入
+inputs/         运行时素材目录(图片/视频不入库)
 ```
 
 被忽略的（各机自行获取/生成）：`models*/ base/ merged/ loras/ src*/ ComfyUI/ env/

@@ -1,0 +1,5 @@
+Scene:
+A circular sniper-scope view of a large steampunk flying machine covered in lamps and mechanical arms, hovering over the red rooftops of an old European city in grey mist.
+
+Motion:
+Seen through the scope, the flying machine drifts and descends toward the rooftops, its lamps glowing, small parts articulating. The scope view tracks the machine smoothly. Natural continuous motion connects the first frame to the last frame. Mechanical humming and distant city ambience.
