@@ -48,3 +48,21 @@ pod 重建:`scripts/setup_runpods.sh`(Mac 项目内)+ 把 scripts/ 推上去。
 `_ASYNC_OUTPUT_TIMEOUT = 30.0`(`diffusion_engine.py:58`),不是显存/模型/配置问题
 —— 同一 pod 上 FP8 基座 NFE11 与全部 Turbo NFE6 格都正常。详见
 `../06_infra/FINAL.md` 同日增补。**结论文字里不要写成"4×5090 跑不了 BF16 基座"。**
+
+## 增补(2026-08-09 夜, session 1ed2dca3): switch 无条件重启导致速度数字虚高
+
+`h3_switch_runpods.sh` 原本缺变体追踪,**每次调用都重启服务**。因此这台机器上
+一切"调一次 CLI 测一次"的做法测到的都是**重启后的冷态首推**,比 warm 慢约 20%:
+
+| 拓扑 | 冷启首推 | warm(复用) |
+|---|---|---|
+| FP8 Turbo TP2×U2 NFE6 | 22.1 / 22.3 / 22.7s | **18.5 / 18.8s** |
+| FP8 Turbo TP4 NFE6 | 24.2s | **20.3s** |
+
+补齐铁律后启动耗时 214s → **5s**,归档的 18.5s 当场复现;
+"TP2×U2 比 TP4 快"的结论也在同一组对照里再次成立(18.5 vs 20.3s)。
+
+顺带堵上安全缺口:没有 `run/vllm.variant` 时,`:8091` 被 base 与 merged-Turbo 两个
+checkpoint 复用却无法判断在服的是哪个 —— 与 5090 上修掉的"静默服错 checkpoint"
+同源。现在变体不匹配会打印
+`vllm variant mismatch (turbo-fp8-tp2u2-r50 -> turbo-fp8-tp4-r50), restarting` 并重启。

@@ -34,9 +34,13 @@
 | `h3_switch_runpods.sh` | runpods | `<original\|turbo> <bf16\|fp8> <tp4\|tp2u2> [resident]`（三维正交，最干净） |
 
 三份共有的运维铁律（改任何一份都要保持）：变体追踪（`run/vllm.variant` + `.model`，
-共用端口时防静默服错 checkpoint）、半死进程清理、端口占用拒启、`flock` 串行化
-**且守护进程必须 `9>&-`**（否则 fd 继承会把锁一直持有）、启动后 `kill -0` 确认存活、
-日志轮转不截断。
+共用端口时防静默服错 checkpoint）、**同变体且健康则直接复用不重启**、半死进程清理、
+端口占用拒启、`flock` 串行化**且守护进程必须 `9>&-`**（否则 fd 继承会把锁一直持有）、
+启动后 `kill -0` 确认存活、日志轮转不截断。
+
+复用那条不只是省事：runpods 冷启动 210s，缺了它每次生成都白付这 210s，而且**测到的
+推理耗时会虚高 20%**（重启后首推 22.3s vs 真 warm 18.5s）。2026-08-09 补齐时正是
+靠这个差值发现的。
 
 ComfyUI worker 启动器：`launch_comfy.sh`（通用，收 `<gpu> [port] [extra]`）、
 `launch_comfy_5090.sh` / `_turbo.sh`(:8189 TeaCache) / `_tlora.sh`(:8190 Turbo LoRA)、
