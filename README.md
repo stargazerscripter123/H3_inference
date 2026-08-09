@@ -66,6 +66,7 @@ scripts/h3_eval.py --first a.png --last b.png --prompt-file p.txt \
 ```
 scripts/        全部代码(编排 CLI + 各机产线脚本 + 工具与测试)
 doc/            方案分析与 benchmark 全表
+doc/machines/   三台 GPU 机的实测档案 + 跨机对照 + 权重台账 + pip/conda 锁定清单
 claude_history/ 实验档案(每个主题一份 FINAL.md 权威结论)
 gallery/        对比展示页(媒体文件不入库)
 workflows/stage_a/   基准提示词 7 则(ToS 场景),归档 benchmark 的原始输入
@@ -77,9 +78,19 @@ outputs/ logs/ run/`。
 
 ## 装机
 
-新机器的完整前提（Python/torch/CUDA 版本、vllm-omni 的 PR pin 与**必打的补丁**、
-ComfyUI 的 pin commit 与 custom_nodes、权重清单）汇总在
-`claude_history/06_infra/FINAL.md`，装机脚本在 `scripts/`：
+**先读 [`doc/machines/`](doc/machines/)** —— 三台 GPU 机的实测档案（硬件/驱动/env/第三方源码
+与补丁/权重落盘/运行期环境变量/从零复现步骤），外加跨机对照与「新机器该装什么」的决策树：
+
+| 想干什么 | 看哪份 |
+|---|---|
+| 拿到一台新机器，不知道装哪套 wheel、能不能跑 serving | [`doc/machines/README.md`](doc/machines/README.md) §3 决策树 |
+| 三台机器哪里一样、哪里不一样 | [`doc/machines/README.md`](doc/machines/README.md) §1–§2 |
+| 在某台机器上复现 / 排障 / 重装 | [`popos-5090.md`](doc/machines/popos-5090.md) · [`popos-6000a.md`](doc/machines/popos-6000a.md) · [`runpods-5090x4.md`](doc/machines/runpods-5090x4.md) 第 7 节 |
+| 下权重 / 权重溯源 / 算磁盘预算 | [`doc/machines/models.md`](doc/machines/models.md) |
+| 精确到包版本 | `doc/machines/locks/`（每机每环境的 `pip freeze` + `conda env export`） |
+| **为什么**这么做（实验证据链） | `claude_history/06_infra/FINAL.md` 及各主题 `FINAL.md` |
+
+装机脚本在 `scripts/`：
 
 - `setup_h3.sh` / `install_backends*.sh`（本地 GPU 机）
 - `setup_runpods.sh` / `post_setup*.sh` / `fix_cu129.sh`（云机）
@@ -87,8 +98,19 @@ ComfyUI 的 pin commit 与 custom_nodes、权重清单）汇总在
 - `merge_turbo_lora.py`（把 Turbo LoRA 合进官方 BF16，产出 `.complete` 契约）
 
 ⚠️ **`pr5910_resident_stride_fix.patch` 必须打上**。不打的话 FP8 + DLO 路径不会报错，
-而是**静默产出纯噪声**——判断补丁在不在要看代码内容（`grep as_strided`），
-不能用 `git diff`（已提交时会误判为"没打"）。
+而是**静默产出纯噪声**。判断补丁在不在要看代码内容，但**必须限定在
+`PinnedResidentLayerGroup` 类内**：
+
+```bash
+sed -n '/class PinnedResidentLayerGroup/,/def offload/p' \
+    <src>/vllm_omni/diffusion/offloader/distributed_layerwise_backend.py | grep -q as_strided
+```
+
+裸的 `grep as_strided <整个文件>` **恒真、毫无鉴别力**——未打补丁的原文件在 streamed 路径
+（299/412 行）本来就有两处；`h3_switch_*.sh` 与 `setup_runpods.sh` 用的就是这个坏判据，
+日志抬头的 `stride_patch=APPLIED_as_strided` 因此**不能当证据**（详见
+[`doc/machines/README.md`](doc/machines/README.md) §2.3）。也不能用 `git diff`
+（补丁已提交时 worktree 干净，会反过来误判为"没打"）。
 
 ## 安全
 

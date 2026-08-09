@@ -40,8 +40,12 @@ cd "$B" && { [ -d src-vllm-omni ] || git clone https://github.com/vllm-project/v
 cd src-vllm-omni && git fetch origin pull/5910/head:pr5910 && git checkout "$PR_HEAD"
 # If this head still repoints resident DLO weights with .view() (stride bug, see
 # claude_history/08_5090_tp2/FINAL.md), apply scripts/pr5910_resident_stride_fix.patch.
-grep -q "as_strided" vllm_omni/diffusion/offloader/distributed_layerwise_backend.py \
-  || echo "WARNING: check resident-group repoint for the stride bug before serving"
+# Scope the check to PinnedResidentLayerGroup: a bare `grep as_strided` over the
+# whole file is vacuously true (the unpatched file already has two occurrences in
+# _shard_and_pin/prefetch_layer), so it never fired and the patch was never applied.
+sed -n '/class PinnedResidentLayerGroup/,/^class /p' \
+    vllm_omni/diffusion/offloader/distributed_layerwise_backend.py | grep -q as_strided \
+  || { echo "applying resident stride fix"; patch -p1 < "$B/scripts/pr5910_resident_stride_fix.patch"; }
 SETUPTOOLS_SCM_PRETEND_VERSION=0.26.0 "$B/env/bin/pip" install -e . --no-build-isolation
 
 wait  # downloads

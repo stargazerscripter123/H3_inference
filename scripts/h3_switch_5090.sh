@@ -62,11 +62,17 @@ _launch_vllm() { # $1 = model root, $2 = label, $3 = resident layers (test 时�
   local LOG="$BASE/logs/vllm_server.log"
   rotate_log "$LOG"
   local SRC="$BASE/src/vllm-omni-pr5910"
-  # 补丁状态按代码内容判定 —— 不能用 git diff: 补丁一旦 commit,worktree 就是干净的,
-  # git diff 会反过来报"没打补丁"(2026-08-09 对抗审查抓到的误判)。
+  # ★ 判据必须**限定在 PinnedResidentLayerGroup 类内**。
+  # 裸的 `grep as_strided <整个文件>` 恒真、毫无鉴别力:未打补丁的原文件在
+  # _shard_and_pin(:299) 与 prefetch_layer(:412) 本来就有两处 as_strided,
+  # 补丁加的那处在 PinnedResidentLayerGroup.load()(:630)。
+  # 2026-08-09 实测反向应用补丁做对照:裸 grep 对"打了/没打"都报 APPLIED。
+  # 也不能用 git diff —— 补丁已提交时 worktree 干净,会反过来误判成"没打"。
+  # 不打这个补丁,FP8+DLO 不报错、**静默产出纯噪声**。
   local DLO="$SRC/vllm_omni/diffusion/offloader/distributed_layerwise_backend.py"
   local STRIDE="MISSING_stride_patch"
-  grep -q "as_strided" "$DLO" 2>/dev/null && STRIDE="APPLIED_as_strided"
+  sed -n '/class PinnedResidentLayerGroup/,/^class /p' "$DLO" 2>/dev/null \
+    | grep -q as_strided && STRIDE="APPLIED_as_strided"
   {
     echo "### h3_switch_5090 launch $(date -Is)"
     echo "### model=$MROOT  label=$LABEL  resident=$RES"
