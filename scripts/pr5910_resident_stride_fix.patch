@@ -1,0 +1,24 @@
+diff --git a/vllm_omni/diffusion/offloader/distributed_layerwise_backend.py b/vllm_omni/diffusion/offloader/distributed_layerwise_backend.py
+index db25f18a..7686659c 100644
+--- a/vllm_omni/diffusion/offloader/distributed_layerwise_backend.py
++++ b/vllm_omni/diffusion/offloader/distributed_layerwise_backend.py
+@@ -620,9 +620,18 @@ class PinnedResidentLayerGroup:
+             for dtype, metas in state["metadata"].items():
+                 gpu_buffer = block_buffers[dtype]
+                 for meta in metas:
++                    # _shard_and_pin packs non-contiguous (e.g. transposed
++                    # online-FP8) weights in physical storage order and saves
++                    # the original stride; rebuild with as_strided exactly like
++                    # prefetch_layer, or transposed views silently become
++                    # row-major garbage.
+                     set_tensor_storage(
+                         targets[meta["name"]],
+-                        gpu_buffer[meta["offset"] : meta["offset"] + meta["numel"]].view(meta["shape"]),
++                        torch.as_strided(
++                            gpu_buffer[meta["offset"] : meta["offset"] + meta["numel"]],
++                            size=meta["shape"],
++                            stride=meta["stride"],
++                        ),
+                     )
+ 
+         current_omni_platform.current_stream().wait_event(ready)

@@ -1,0 +1,62 @@
+# ── 绝不入库：凭据 ────────────────────────────────────────────────
+# 本仓库是公开的。任何密钥/令牌都不要放进工作区,更不要提交。
+credentials/
+*.token
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+
+# ── 绝不入库：受限素材 ───────────────────────────────────────────
+# 项目内容红线(见 claude_history/CLAUDE.md):不使用/不分发未授权的
+# 真实可识别人物影像。基准素材一律用 Tears of Steel (CC-BY)。
+data/
+
+# ── 模型权重与第三方源码(几百 GB,各机自行获取) ──────────────────
+models/
+models_*/
+base/
+merged/
+loras/
+h3_weights/
+src/
+src-*/
+ComfyUI/
+env/
+venv/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+
+# ── 运行时状态与产物 ─────────────────────────────────────────────
+outputs/
+logs/
+run/
+inputs/*
+!inputs/.gitkeep
+workflows/*
+!workflows/.gitkeep
+!workflows/stage_a/
+gallery/media/
+
+# 媒体产物(gallery/index.html 引用的文件不入库,见 gallery 说明)
+*.mp4
+*.mov
+*.webm
+*.wav
+
+# ── 版本控制的替代品,现在有 git 了就不需要了 ────────────────────
+*.orig_2026*
+*.orig
+*.bak
+
+# ── 杂项 ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.DS_Store
+.claude/
+.ipynb_checkpoints/

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniMax H3 FL2VA 冒烟测试 Gallery</title>
+<style>
+  :root {
+    --bg: #101216; --card: #191c22; --border: #2a2e37;
+    --text: #e6e8ec; --muted: #9aa1ad; --accent: #6aa1ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    line-height: 1.55; padding: 32px 20px 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 650; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 16px; font-weight: 600; margin: 34px 0 12px; color: var(--accent); }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; margin-bottom: 18px;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  @media (max-width: 720px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+  figure img, video { width: 100%; border-radius: 6px; display: block; background: #000; }
+  figcaption { font-size: 12px; color: var(--muted); margin-top: 6px; text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  code { background: #10131a; border: 1px solid var(--border); border-radius: 4px;
+         padding: 1px 6px; font-size: 12px; color: #c3ccda; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre { background: #10131a; border: 1px solid var(--border); border-radius: 6px;
+        padding: 12px; font-size: 12px; color: #c3ccda; white-space: pre-wrap; margin-top: 8px; }
+  .badge { display: inline-block; font-size: 11px; border-radius: 20px; padding: 2px 10px;
+           margin-left: 8px; vertical-align: 2px; }
+  .ok { background: #12351f; color: #7fd89a; border: 1px solid #1e5432; }
+  .pend { background: #33280f; color: #e0b654; border: 1px solid #57431a; }
+  .machine { font-size: 15px; font-weight: 600; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>MiniMax H3 · FL2VA 冒烟测试</h1>
+<div class="sub">
+  首帧 + 尾帧 → 视频 + 原生立体声 · 832×480 · 124 帧 @24fps (5.17s) · 30 steps · seed 0 ·
+  ComfyUI <code>57500fc</code> · 素材: Tears of Steel (CC-BY, Blender Foundation) t=147s
+</div>
+
+<h2>输入首尾帧</h2>
+<div class="card">
+  <div class="grid2">
+    <figure><img src="media/first_832x480.png" alt="first frame"><figcaption>First frame(输入,t=147.0s)</figcaption></figure>
+    <figure><img src="media/last_832x480.png" alt="last frame"><figcaption>Last frame(输入,t=152.125s,+123 帧)</figcaption></figure>
+  </div>
+  <details><summary>Prompt(正向约束模板,无 negative / 无 CFG)</summary>
+<pre>Subject invariants:
+The same man remains present throughout the entire video. His face, short dark hair, dark jacket and the large rifle he is holding remain unchanged.
+
+Opening state:
+At the beginning, he lies in position behind his rifle aiming past a stone balustrade, calm and focused, exactly as shown in the first image.
+
+Motion trajectory:
+He keeps aiming steadily. Gradually his expression tightens with strain and emotion; his brow furrows, his eyes narrow, and his head shifts slightly forward against the rifle stock.
+
+Camera:
+The camera remains static. No cut, no change of lens, no sudden reframing.
+
+Scene continuity:
+The stone balustrade in the foreground, the rifle, the orange juice carton on the ledge and the dim blue-grey lighting remain stable.
+
+Ending state:
+The final frame naturally matches the supplied last image without a sudden speed-up or abrupt morph.
+
+Audio:
+Only subtle wind and distant rooftop ambience; no speech and no music.</pre>
+  </details>
+</div>
+
+<h2>popos-5090 · RTX 5090 (32GB) · GPU1 <span class="badge ok">PASS</span></h2>
+<div class="card">
+  <video controls preload="metadata" src="media/h3_smoke_5090.mp4"></video>
+  <figcaption style="margin-top:6px">▶ 带声音播放(原生生成的 32kHz 立体声环境音)</figcaption>
+  <div class="grid3" style="margin-top:14px">
+    <figure><img src="media/5090_frame0.png"><figcaption>输出 frame 0(对齐首帧 ✓)</figcaption></figure>
+    <figure><img src="media/5090_frame60.png"><figcaption>输出 frame 60(过渡中)</figcaption></figure>
+    <figure><img src="media/5090_frame123.png"><figcaption>输出 frame 123(对齐尾帧 ✓)</figcaption></figure>
+  </div>
+  <table>
+    <tr><th>DiT</th><td><code>minimax_h3_fl2va_pruned_int8_convrot</code> (21.0 GB)</td>
+        <th>Text encoder</th><td><code>qwen3vl_32b nvfp4_awq</code> (15.7 GB)</td></tr>
+    <tr><th>总耗时</th><td>110 s(含模型加载;denoise 3.0 s/步 ×30)</td>
+        <th>峰值 VRAM</th><td>31.5 / 32.6 GB(单卡贴顶,分卡方案见结论)</td></tr>
+    <tr><th>输出校验</th><td colspan="3">h264 832×480 · 124 帧 · 5.167s · AAC 立体声 32kHz ✓</td></tr>
+  </table>
+</div>
+
+<h2>popos-6000a · RTX 6000 Ada (48GB) · GPU3 <span class="badge ok">PASS</span></h2>
+<div class="card" id="card-6000a">
+  <video controls preload="metadata" src="media/h3_smoke_6000a.mp4"></video>
+  <figcaption style="margin-top:6px">▶ 带声音播放 · 与 5090 同 seed(0)同素材,TE 精度不同(INT8 vs NVFP4)</figcaption>
+  <div class="grid3" style="margin-top:14px">
+    <figure><img src="media/6000a_frame0.png"><figcaption>输出 frame 0(对齐首帧 ✓)</figcaption></figure>
+    <figure><img src="media/6000a_frame60.png"><figcaption>输出 frame 60(过渡中)</figcaption></figure>
+    <figure><img src="media/6000a_frame123.png"><figcaption>输出 frame 123(对齐尾帧 ✓)</figcaption></figure>
+  </div>
+  <table>
+    <tr><th>DiT</th><td><code>minimax_h3_fl2va_pruned_int8_convrot</code> (21.0 GB)</td>
+        <th>Text encoder</th><td><code>qwen3vl_32b int8_convrot</code> (27.1 GB)</td></tr>
+    <tr><th>总耗时</th><td>210 s(含冷启动模型加载;后续任务会明显更快)</td>
+        <th>峰值 VRAM</th><td>48.2 / 49.1 GB(TE+DiT 同卡驻留)</td></tr>
+    <tr><th>输出校验</th><td colspan="3">h264 832×480 · 124 帧 · 5.167s · AAC 立体声 32kHz ✓</td></tr>
+  </table>
+</div>
+
+<h2>popos-5090 · turbo 加速产线(GPU0 独立 worker)<span class="badge ok">PASS · warm 35s</span></h2>
+<div class="card">
+  <video controls preload="metadata" src="media/h3_turbo_5090.mp4"></video>
+  <figcaption style="margin-top:6px">▶ 864×480 · 12 步 · TeaCache 0.10(有损缓存,跳 ~40% forward)· seed 0</figcaption>
+  <div class="grid3" style="margin-top:14px">
+    <figure><img src="media/turbo_frame0.png"><figcaption>输出 frame 0(对齐首帧 ✓)</figcaption></figure>
+    <figure><img src="media/turbo_frame60.png"><figcaption>输出 frame 60(过渡中)</figcaption></figure>
+    <figure><img src="media/turbo_frame123.png"><figcaption>输出 frame 123(对齐尾帧 ✓)</figcaption></figure>
+  </div>
+  <table>
+    <tr><th>warm 延迟</th><td><b>35s</b>(vs baseline ~95-110s,≈3×)</td>
+        <th>有效 s/it</th><td>1.91(裸 12 步为 3.29)</td></tr>
+    <tr><th>配置</th><td colspan="3">pruned INT8 DiT + NVFP4 TE · TeaCache <code>4cbb50d</code> thresh 0.10 start 2 end -2 · worker: <code>--async-offload 2 --reserve-vram 1.5</code></td></tr>
+    <tr><th>Benchmark</th><td colspan="3">B1-B5 全表见 <code>doc/speedup_5090_results.md</code>;baseline 产线(GPU1:8188)未受影响</td></tr>
+  </table>
+</div>
+
+<h2>popos-6000a · vLLM-Omni 4卡产线 <span class="badge ok">turbo FP8 · warm 37s</span></h2>
+<div class="card">
+  <video controls preload="metadata" src="media/h3_vllm_fp8_6000a.mp4"></video>
+  <figcaption style="margin-top:6px">▶ turbo:TP4 + 在线 FP8 · 864×480 · 12 步 · seed 0(无 TeaCache,唯一近似是 FP8)</figcaption>
+  <div class="grid3" style="margin-top:14px">
+    <figure><img src="media/h3_vllm_bf16_6000a_frame123.png"><figcaption>vllm 产线(BF16 无损, 44s)frame 123</figcaption></figure>
+    <figure><img src="media/h3_vllm_fp8_6000a_frame123.png"><figcaption>turbo 产线(FP8, 37s)frame 123</figcaption></figure>
+    <figure><img src="media/sglang_fp8_frame123.png" style="max-width:100%"><figcaption>sglang 产线(FP8 · <b>1376×768 高清</b> · 126s)frame 123</figcaption></figure>
+  </div>
+  <table>
+    <tr><th>turbo(vLLM FP8)</th><td><b>37.4s</b> · ~38G ×4 卡</td>
+        <th>vllm(BF16 无损)</th><td>44.2s · ~46G ×4 卡</td></tr>
+    <tr><th>sglang(768P 高清)</th><td>126.2s · 1376×768(API 锁 768 短边)</td>
+        <th>vs baseline</th><td>ComfyUI 单卡 ~100s(热)→ <b>2.7×</b></td></tr>
+    <tr><th>Benchmark 全表</th><td colspan="3"><code>doc/speedup_6000a_results.md</code> · 三条 serving 产线互斥占 4 卡,CLI 切换含分钟级冷启动</td></tr>
+  </table>
+</div>
+
+<h2>popos-6000a · 4卡 BF16 Oracle(方案二)<span class="badge ok">PASS</span></h2>
+<div class="card">
+  <video controls preload="metadata" src="media/h3_smoke_6000a_bf16.mp4"></video>
+  <figcaption style="margin-top:6px">▶ 全 BF16 零量化 · 同 seed(0)同素材,可与上面 INT8 结果直接对比</figcaption>
+  <div class="grid3" style="margin-top:14px">
+    <figure><img src="media/6000a_bf16_frame0.png"><figcaption>输出 frame 0(对齐首帧 ✓)</figcaption></figure>
+    <figure><img src="media/6000a_bf16_frame60.png"><figcaption>输出 frame 60(过渡中)</figcaption></figure>
+    <figure><img src="media/6000a_bf16_frame123.png"><figcaption>输出 frame 123(对齐尾帧 ✓)</figcaption></figure>
+  </div>
+  <table>
+    <tr><th>DiT</th><td><code>minimax_h3_fl2va_bf16</code> (66.3 GB, 非 pruned)</td>
+        <th>Text encoder</th><td><code>qwen3vl_32b bf16</code> (51.5 GB)</td></tr>
+    <tr><th>Denoise</th><td>10.49 s/步 ×30 = 314 s(约为 INT8 的 3.2 倍耗时)</td>
+        <th>总耗时</th><td>400 s(含 118GB 权重从 NVMe 冷加载)</td></tr>
+    <tr><th>VRAM 分布</th><td colspan="3">gpu0 47.6G(TE 主体)· gpu1 7.4G(TE 溢出+VAE)· gpu2 47.3G(DiT compute)· gpu3 0.7G(donor 未被使用,DiT 溢出走了内存流式)</td></tr>
+    <tr><th>实现</th><td colspan="3">ComfyUI + DisTorch2(P2P 全互通);kreaid 服务已停腾出 GPU0/1。无需 Diffusers 路线。</td></tr>
+  </table>
+</div>
+
+<h2>尾帧保真三方对比(frame 123)</h2>
+<div class="card">
+  <div class="grid3">
+    <figure><img src="media/last_832x480.png"><figcaption>输入尾帧(ground truth)</figcaption></figure>
+    <figure><img src="media/6000a_frame123.png"><figcaption>pruned INT8 输出</figcaption></figure>
+    <figure><img src="media/6000a_bf16_frame123.png"><figcaption>BF16 oracle 输出</figcaption></figure>
+  </div>
+</div>
+
+<h2>popos-6000a · Turbo LoRA merged 产线(07 主题, 2026-08-08)<span class="badge ok">vLLM FP8 · NFE6 23.5s</span></h2>
+<div class="card">
+  <video controls preload="metadata" src="media/h3_turbolora_vllm_fp8_nfe6.mp4"></video>
+  <figcaption style="margin-top:6px">▶ turbo-lora:v4_step600_ema merge 进 BF16 → vLLM TP4 在线 FP8 · 864×480 · <b>NFE 6</b>(6 次 DiT forward)· seed 0</figcaption>
+  <div class="grid3" style="margin-top:14px">
+    <figure><img src="media/turbolora_frame0.png"><figcaption>frame 0(对齐首帧 ✓)</figcaption></figure>
+    <figure><img src="media/turbolora_frame60.png"><figcaption>frame 60(过渡中)</figcaption></figure>
+    <figure><img src="media/turbolora_frame123.png"><figcaption>frame 123(对齐尾帧 ✓)</figcaption></figure>
+  </div>
+  <table>
+    <tr><th>NFE6(生产候选)</th><td><b>23.5s</b>(timed×3: 23.5/23.5/23.6)</td>
+        <th>NFE4(极速档)</th><td><b>17.9s</b>(timed×3 全 17.9)</td></tr>
+    <tr><th>vs 原 turbo(12步 FP8)</th><td>37.7s → <b>1.60×</b></td>
+        <th>vs baseline ComfyUI</th><td>~100s → <b>4.3×</b></td></tr>
+    <tr><th>SGLang 768P 高清档</th><td>NFE6 <b>72.1s</b>(原 126.2s → 1.75×)</td>
+        <th>同分辨率对照</th><td>1344×768 NFE6: vLLM 69.7-70.6s ≈ SGLang 72.1s</td></tr>
+    <tr><th>质量快筛</th><td colspan="3">8 case × NFE4/6/8:7 case NFE6 全优;极端运动 case(fight)NFE4 失败/NFE6 边界(源帧本身重度模糊),大运动备选 ckpt850;base FP8 同 NFE 对照运动性明显更僵(归因 ✓)</td></tr>
+    <tr><th>全表</th><td colspan="3"><code>doc/turbo_lora_results.md</code> · merge 三层校验(位级/Comfy oracle/前向)全过 · 步数语义 engine steps = NFE+1</td></tr>
+  </table>
+</div>
+
+<h2>大运动边界 case(fight)· Turbo LoRA 的弱点与备选</h2>
+<div class="card">
+  <div class="grid3">
+    <figure><video controls preload="metadata" src="media/h3_turbolora_fight_nfe6.mp4"></video><figcaption>v4s600 NFE6 @864×480(vLLM merged FP8):仍有强拖影</figcaption></figure>
+    <figure><video controls preload="metadata" src="media/h3_ck850_fight_nfe4_768p.mp4"></video><figcaption>ckpt850 NFE4 @1376×768(SGLang dynamic):动态姿态保留更好</figcaption></figure>
+    <figure><video controls preload="metadata" src="media/h3_turbolora_sgl_merged_nfe6_768p.mp4"></video><figcaption>参照:SGLang merged NFE6 768P(标准 sniper 素材)</figcaption></figure>
+  </div>
+  <figcaption style="margin-top:6px">注:fight 素材的首尾帧本身就是重度运动模糊的电影帧;与 base FP8 NFE11 的对照见 outputs/stageA_*(待盲评)。</figcaption>
+</div>
+
+<h2>观察与下一步</h2>
+<div class="card">
+  <ul style="padding-left: 18px; font-size: 14px;">
+    <li>两台均 PASS:首尾帧对齐、人物身份、表情过渡良好;无 final-frame rushing。同 seed 下两台输出高度相似,TE 量化差异(INT8 vs NVFP4)未见明显质量分歧 —— 有利于 5090 走更省显存的 NVFP4。</li>
+    <li>耗时:denoise 均 ~3.0s/步 ×30;5090 全程 110s / 6000a 冷启动 210s(6000a 是 INT8 TE 27GB 首次从磁盘加载,热身后两台同级)。</li>
+    <li>5090 单卡 VRAM 峰值 31.5/32.6 GB(贴顶);<b>MultiGPU 分卡实验失败</b>:两张消费级 5090 无 P2P,ComfyUI-MultiGPU 的 CPU 中转路径与 comfy-kitchen 张量封装不兼容(illegal memory access,服务端崩溃)—— 上游 bug,已回退单卡稳定配置。更大画布依赖 ComfyUI 动态换载(慢但可跑)。</li>
+    <li>BF16 oracle 已落地(上方卡片):同 seed 下 pruned INT8 与 BF16 输出高度一致,832×480 尺度肉眼未见系统性质量差 —— 按 doc Gate 3 逻辑,<b>pruned INT8 可作为该分辨率的生产档位</b>,BF16 保留作诊断参照。BF16 代价:3.2× denoise 耗时 + 118GB 权重。</li>
+    <li>已知问题:DisTorch2 的 donor 分配未按预期落在 gpu3(DiT 溢出部分走内存流式,gpu3 闲置)—— 不影响正确性,后续想压 BF16 延迟可用 expert_mode_allocations 精调。</li>
+  </ul>
+</div>
+
+<div class="note">生成于 2026-08-05 · Claude Code · 素材版权: Tears of Steel © Blender Foundation, CC-BY 3.0</div>
+</div>
+</body>
+</html>
