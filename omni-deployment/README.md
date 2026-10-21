@@ -6,11 +6,13 @@ image/video/audio generation requests and sequential benchmarks. SP2 means
 sequence parallelism with replicated NVFP4 weights and parallel VAE; TP stays 1.
 Two 32-GB cards do not become one 64-GB memory pool.
 
-**Status on 2026-10-21:** the package has passed local CPU checks. The target
-environment now uses managed Python 3.12.15 and Torch 2.12/cu130. GPU generation,
-Ray integration, table preparation, memory peaks and latency have **not** been
-validated. This is not a completed deployment or a claim of a 15-second result.
-The resolved dependency lock and verified asset manifest are still pending.
+**Status on 2026-10-21:** 31 CPU tests, native sparse-attention GPU tests,
+FlashInfer/VAE parity tests, FFN/vision contract tests, NCCL probes, private Ray
+GCS liveness, and actual SP1/SP2 configuration conversion have passed. The
+environment and source-kernel provenance are recorded in [ENVIRONMENT.md](ENVIRONMENT.md).
+Model download/hash verification, AdaLN preparation, full GPU generation,
+SP2 service integration, memory peaks and latency remain pending. This is not
+yet a completed deployment or a claim of a 15-second result.
 
 ## Fixed source and model versions
 
@@ -20,10 +22,10 @@ The resolved dependency lock and verified asset manifest are still pending.
 | Native FastH3 Omni NVFP4 QAD | `f01e6a23ac6066aa9eb622cf94b6259442e70ec2` | Intended download revision; actual files require the downloader manifest |
 | Sampling contract | Ref2VA, released 8-forward PDD, CFG 1, 24 fps | Client/schema CPU checks passed; no legacy `NFE+1` conversion |
 | Python | Project-managed 3.12.15, including development headers | Installed in the dedicated target venv |
-| Torch / CUDA wheels | Pinned source requires Torch 2.12.0; target installation uses cu130 | Full resolved environment and kernel execution pending |
-| FastVideo kernel | Build from the fixed FastVideo source; PyPI 0.3.5 predates the required sparse FP4 API | Target build and numerical execution pending |
-| CUDA build tools | NVCC 13.0.88 and CCCL 13.0.85 | Intended pins; complete toolkit layout and CMake detection pending |
-| Ray | Source requires `>=2.49.1`; health adapter reviewed against 2.49.1 | Record installed version and verify the private GCS API before SP2 acceptance |
+| Torch / CUDA wheels | Pinned source requires Torch 2.12.0; target installation uses cu130 | Installed; targeted native GPU tests passed; resolved freeze recorded |
+| FastVideo kernel | Build from the fixed FastVideo source; PyPI 0.3.5 predates the required sparse FP4 API | Built from pinned source for sm120a; targeted numerical tests passed |
+| CUDA build tools | NVCC 13.0.88 and CCCL 13.0.85 | Installed with env-local development-library links; source build passed |
+| Ray | Source requires `>=2.49.1`; health adapter reviewed against 2.49.1 | Installed Ray2.59.0; private GCS ALIVE probe passed; full SP2 serving still pending |
 | Optional FA4 stack | Source pins FlashAttention `14c377950125c70b7a9dabf9c561fca53715ac7d`, CuTe DSL `4.6.0.dev0`, quack `0.5.3` | These are upstream requirements, not an installed lock; serving recipe sets `FASTVIDEO_FA4=0` |
 
 The new host reports Pop!_OS 24.04, driver 595.104.02, about 125 GiB RAM, GPU0

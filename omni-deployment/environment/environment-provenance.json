@@ -1,0 +1,49 @@
+{
+  "python": "Python 3.12.15",
+  "packages": {
+    "torch": "2.12.0+cu130",
+    "transformers": "5.15.1",
+    "diffusers": "0.41.0",
+    "flashinfer-python": "0.7.2",
+    "ray": "2.59.0",
+    "triton": "3.7.0",
+    "fastvideo": "0.2.1",
+    "fastvideo-kernel": "0.3.5",
+    "nvidia-cuda-nvcc": "13.0.88",
+    "nvidia-cuda-cccl": "13.0.85"
+  },
+  "fastvideo_revision": "cdda1b7535fe32699335e39db82c1d4db21ceb88",
+  "kernel_wheel": "/home/isaac/workdir/h3/wheels/fastvideo-cdda1b75-cu130-sm120a/fastvideo_kernel-0.3.5-cp312-cp312-linux_x86_64.whl",
+  "kernel_sha256": "e3b7537f3aeb46e2986e5501f895d62dc3d763123bca4d6a5857615eb7526dc0",
+  "arch": "sm120a",
+  "cmake_flags": {
+    "FASTVIDEO_KERNEL_BUILD_TK": "OFF",
+    "FASTVIDEO_KERNEL_BUILD_ATTN_QAT_INFER": "ON",
+    "FASTVIDEO_KERNEL_BUILD_ULYSSES_A2A": "OFF"
+  },
+  "toolkit_layout": "env-local cu13/lib64 -> lib; unversioned .so links to installed versioned shared objects",
+  "cuda_tests": {
+    "sparse_attention": {
+      "passed": 2,
+      "deselected": 6,
+      "log": "logs/omni/kernel-gpu-tests-01.log"
+    },
+    "nccl_all_to_all": "PASS",
+    "ray_private_gcs_actor_liveness": {
+      "version": "2.59.0",
+      "state": "ALIVE",
+      "result": "PASS"
+    },
+    "flashinfer_vae": {
+      "passed": 5,
+      "deselected": 56,
+      "log": "logs/omni/flashinfer-vae-tests-01.log"
+    },
+    "ffn_vision": {
+      "passed": 8,
+      "deselected": 15,
+      "log": "logs/omni/ffn-vision-tests-01.log"
+    }
+  },
+  "pipeline_synthetic_processor": "PASS"
+}
