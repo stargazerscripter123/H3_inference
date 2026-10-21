@@ -13,6 +13,20 @@ import sys
 FASTVIDEO_COMMIT = "cdda1b7535fe32699335e39db82c1d4db21ceb88"
 
 
+def private_ray_node_address(ray) -> str:
+    """Match FastVideo's placement constraint to Ray's actual local node."""
+    node_id = ray.get_runtime_context().get_node_id()
+    nodes = [node for node in ray.nodes() if node.get("Alive")
+             and node.get("NodeID") == node_id]
+    if len(nodes) != 1:
+        raise RuntimeError("Private Ray current node is missing or ambiguous")
+    node = nodes[0]
+    address = node.get("NodeManagerAddress")
+    if not isinstance(address, str) or not address or node.get("Resources", {}).get(f"node:{address}", 0) <= 0:
+        raise RuntimeError("Private Ray node address has no matching scheduling resource")
+    return address
+
+
 def main() -> None:
     # Uvicorn replaces this while serving. During imports/model/Ray startup,
     # convert TERM into Python unwinding so the private Ray finally still runs.
@@ -63,12 +77,17 @@ def main() -> None:
                 _temp_dir=f"/tmp/h3-omni-{os.getuid()}-{args.owner_token[:8]}",
                 _node_ip_address="127.0.0.1",
             )
+            # Ray may normalize loopback to the local interface address.
+            # FastVideo pins its first placement bundle to node:<get_ip()>.
+            os.environ["FASTVIDEO_HOST_IP"] = private_ray_node_address(ray)
             from omni_ray_health import install_ray_health_adapter
             install_ray_health_adapter()
             resources = ray.cluster_resources()
             if int(resources.get("GPU", 0)) != typed.generator.engine.num_gpus:
                 raise RuntimeError(f"Unexpected private Ray GPU resources: {resources}")
-            print(json.dumps({"private_ray": True, "resources": resources}), flush=True)
+            print(json.dumps({"private_ray": True, "node_resource_verified": True,
+                              "gpu_resources": resources.get("GPU"),
+                              "cpu_resources": resources.get("CPU")}), flush=True)
 
         from fastvideo.entrypoints.cli.serve import ServeSubcommand
         ServeSubcommand().cmd(argparse.Namespace(config=args.config))

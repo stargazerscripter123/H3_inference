@@ -95,7 +95,10 @@ restarting. The package never runs a global `ray stop` or kills arbitrary GPU PI
 
 SP2 creates Ray with `address="local"`, a private namespace/temp directory,
 2 GPUs, 8 CPUs and a 4 GiB object store. It does not connect to an existing Ray
-cluster. The object store cap is not a cap on all host memory: model loading,
+cluster. After initialization the launcher verifies the current Ray node and uses its
+advertised address for FastVideo placement constraints; Ray can normalize a
+requested loopback address. The HTTP service remains bound to loopback.
+The object store cap is not a cap on all host memory: model loading,
 pinned TE buffers, Python workers and activations must still be monitored.
 Upstream `OpenAIServingEngine` already serializes requests with an asyncio lock.
 

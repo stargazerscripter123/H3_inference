@@ -12,10 +12,30 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import omni_control as control
 from omni_ray_health import install_ray_health_adapter
+from omni_service import private_ray_node_address
 
 
 def actor(identity):
     return NS(_actor_id=NS(hex=lambda: identity))
+
+
+class RayNodeAddressTest(unittest.TestCase):
+    def runtime(self, nodes):
+        return NS(get_runtime_context=lambda: NS(get_node_id=lambda: "owned"), nodes=lambda: nodes)
+
+    def test_uses_actual_current_node_resource_not_loopback_or_other_node(self):
+        nodes = [{"Alive": True, "NodeID": "other", "NodeManagerAddress": "192.0.2.9",
+                  "Resources": {"node:192.0.2.9": 1}},
+                 {"Alive": True, "NodeID": "owned", "NodeManagerAddress": "192.0.2.10",
+                  "Resources": {"node:192.0.2.10": 1}}]
+        self.assertEqual(private_ray_node_address(self.runtime(nodes)), "192.0.2.10")
+
+    def test_missing_dead_or_unmatched_resource_fails_before_scheduling(self):
+        for nodes in ([], [{"Alive": False, "NodeID": "owned"}],
+                      [{"Alive": True, "NodeID": "owned", "NodeManagerAddress": "127.0.0.1",
+                        "Resources": {"node:192.0.2.10": 1}}]):
+            with self.subTest(nodes=nodes), self.assertRaises(RuntimeError):
+                private_ray_node_address(self.runtime(nodes))
 
 
 class ToolchainSettingsTest(unittest.TestCase):
