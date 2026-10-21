@@ -39,7 +39,9 @@ LIMITS = {"image": 9, "video": 3, "audio": 3}
 
 
 class ClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, manifest: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.manifest = manifest
 
 
 class HTTPFailure(ClientError):
@@ -295,14 +297,16 @@ def run_job(server: str, payload: dict[str, Any], references: list[dict[str, Any
         return manifest
     except (Exception, KeyboardInterrupt) as error:
         previous = manifest["status"]
-        rejected = isinstance(error, HTTPFailure) and 400 <= error.status < 500
+        rejected = (previous == "submitting" and manifest["request_id"] is None
+                    and isinstance(error, HTTPFailure) and 400 <= error.status < 500)
         manifest["status"] = "failed" if manifest["request_id"] or rejected else "submission_unknown"
         manifest["failed_phase"] = previous
         manifest["error"] = f"{type(error).__name__}: {error}"
         manifest["timings"]["client_elapsed_s"] = time.perf_counter() - started
         manifest["server_may_still_be_running"] = (not rejected and previous in {"submitting", "queued", "in_progress"})
         save_json(manifest_path, manifest)
-        raise ClientError(f"{error}; manifest={manifest_path}; no automatic resubmission or server cancellation") from error
+        raise ClientError(f"{error}; manifest={manifest_path}; no automatic resubmission or server cancellation",
+                          manifest=manifest) from error
 
 
 def parser() -> argparse.ArgumentParser:

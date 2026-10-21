@@ -102,6 +102,51 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(by_case["single-image"]["p50_s_successes_only"], 10.0)
         self.assertEqual(by_case["video-ref"]["valid_on_time_rate"], 0.0)
 
+    def test_warmup_failure_preserves_full_not_run_ledger(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = []
+            for index, (case_id, phase) in enumerate([
+                    ("S4", "warmup"), ("S4", "measured"), ("S4", "measured"),
+                    ("other-case", "measured"), ("other-case", "measured")]):
+                rows.append({"name": f"row-{index}", "case_id": case_id, "phase": phase,
+                             "cache_condition": "unspecified" if phase == "warmup" else "warm-new",
+                             "prompt": "A test scene.", "seed": index, "frames": 124,
+                             "references": [{"type": "image", "source": "/server/input.png"}]})
+            plan = root / "plan.json"
+            plan.write_text(json.dumps({"requests": rows}))
+
+            def fail(_server, _payload, _audit, **kwargs):
+                # The complete ledger is already durable before the first job.
+                before = json.loads((kwargs["output_root"] / "report.json").read_text())
+                self.assertEqual(len(before["plan_ledger"]), 5)
+                self.assertEqual(before["plan_ledger"][0]["outcome"], "in_progress")
+                raise client.ClientError("server OOM", manifest={
+                    "manifest_path": "/evidence/manifest.json", "request_id": "oom-job",
+                    "failed_phase": "failed", "server_may_still_be_running": False,
+                    "server_job": {"status": "failed"}})
+
+            argv = ["bench_omni.py", "--plan", str(plan), "--server-paths", "--output-root", str(root / "out")]
+            with patch("sys.argv", argv), patch("bench_omni.shutil.which", return_value="ffprobe"), \
+                    patch("bench_omni.run_omni.run_job", side_effect=fail) as runner, patch("builtins.print"):
+                self.assertEqual(bench_omni.main(), 1)
+            self.assertEqual(runner.call_count, 1)
+            report = json.loads(next((root / "out").glob("*/report.json")).read_text())
+            self.assertEqual(report["planned_requests"], 5)
+            self.assertEqual(report["attempted_requests"], 1)
+            self.assertEqual(report["failed_requests"], 1)
+            self.assertEqual(report["not_run_requests"], 4)
+            self.assertEqual(report["attempted_measured_requests"], 0)
+            self.assertEqual(report["results"][0]["request_id"], "oom-job")
+            self.assertEqual(report["results"][0]["manifest_path"], "/evidence/manifest.json")
+            for entry in report["plan_ledger"][1:]:
+                self.assertEqual(entry["outcome"], "not_run")
+                self.assertEqual(entry["blocked_by_index"], 0)
+            self.assertEqual(len(report["summary"]), 2)
+            for group in report["summary"]:
+                self.assertEqual((group["planned"], group["attempted"], group["failed"], group["not_run"]), (2, 0, 0, 2))
+                self.assertIsNone(group["valid_on_time_rate"])
+
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
 class WorkflowTests(unittest.TestCase):
@@ -194,6 +239,20 @@ class WorkflowTests(unittest.TestCase):
         result = self.manifest()
         self.assertEqual(result["status"], "failed")
         self.assertFalse(result["server_may_still_be_running"])
+
+    def test_poll_4xx_does_not_prove_running_job_was_rejected(self):
+        accepted = io.BytesIO(json.dumps({"id": "active-job", "status": "in_progress"}).encode())
+        missing = urllib.error.HTTPError("http://server/v1/videos/active-job", 404, "Not Found", {}, io.BytesIO(b"missing job"))
+        with patch("urllib.request.urlopen", side_effect=[accepted, missing]) as transport:
+            with self.assertRaises(client.ClientError) as raised:
+                client.run_job("http://127.0.0.1:8108", self.payload, self.audit,
+                               output_root=Path(self.root.name), poll_interval=0.001)
+        self.assertEqual(transport.call_count, 2)
+        result = self.manifest()
+        self.assertEqual(result["request_id"], "active-job")
+        self.assertEqual(result["failed_phase"], "in_progress")
+        self.assertTrue(result["server_may_still_be_running"])
+        self.assertEqual(raised.exception.manifest["manifest_path"], result["manifest_path"])
 
     def test_bad_media_is_rejected(self):
         payload = {**self.payload, "num_frames": 141}

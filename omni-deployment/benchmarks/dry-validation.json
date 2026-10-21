@@ -11,8 +11,8 @@
   "total_explicit_warmups": 8,
   "derivative_assets": 21,
   "api_payloads_built_without_network": 20,
-  "run_omni_sha256": "9e66fd4a0c63c09f4d1c971ffec975aa94727627c6539e1efc19df0b01f47c1c",
-  "bench_omni_sha256": "f22f02d75e1ab279c0863a56a9906032cc2ae31e2a573e04068baaec568af44b",
+  "run_omni_sha256": "6eb1609fde904efe1837d620f6233a1445192be008030d9ebc6ac64fbf06ba59",
+  "bench_omni_sha256": "45556c4aef3d0a5cb784de2f973127d76541c674ada9b9895a3c175e7a7155aa",
   "media_exists_or_hash_verified": false,
   "media_opened": false,
   "gpu_generation_executed": false

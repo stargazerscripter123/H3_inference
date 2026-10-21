@@ -6,20 +6,22 @@ image/video/audio generation requests and sequential benchmarks. SP2 means
 sequence parallelism with replicated NVFP4 weights and parallel VAE; TP stays 1.
 Two 32-GB cards do not become one 64-GB memory pool.
 
-**Status on 2026-10-21:** 31 CPU tests, native sparse-attention GPU tests,
-FlashInfer/VAE parity tests, FFN/vision contract tests, NCCL probes, private Ray
-GCS liveness, and actual SP1/SP2 configuration conversion have passed. The
-environment and source-kernel provenance are recorded in [ENVIRONMENT.md](ENVIRONMENT.md).
-Model download/hash verification, AdaLN preparation, full GPU generation,
-SP2 service integration, memory peaks and latency remain pending. This is not
-yet a completed deployment or a claim of a 15-second result.
+**Status on 2026-10-21:** 41 CPU tests and targeted GPU/operator tests passed.
+All 47 pinned model assets (68,579,945,084 bytes) are verified; the two-mode
+AdaLN table is prepared with eight completed forwards per diagnostic request.
+Fresh SP1 table reuse passed image, multi-image and image+audio at 124 frames;
+the fourth image+video request failed with a prefix-attention CUDA OOM. The
+362-frame cases were not run in that sequence. SP2 service integration and
+formal warm timing remain in progress; output quality requires human review.
+See [validation](validation/) for numerical evidence and
+[ENVIRONMENT.md](ENVIRONMENT.md) for source-kernel and environment provenance.
 
 ## Fixed source and model versions
 
 | Item | Version or requirement | Verification status |
 | --- | --- | --- |
 | FastVideo | `cdda1b7535fe32699335e39db82c1d4db21ceb88` | Local source inspected; launcher checks target checkout HEAD |
-| Native FastH3 Omni NVFP4 QAD | `f01e6a23ac6066aa9eb622cf94b6259442e70ec2` | Intended download revision; actual files require the downloader manifest |
+| Native FastH3 Omni NVFP4 QAD | `f01e6a23ac6066aa9eb622cf94b6259442e70ec2` | All 47 files verified against pinned source identities; see environment/verified-model-assets.json |
 | Sampling contract | Ref2VA, released 8-forward PDD, CFG 1, 24 fps | Client/schema CPU checks passed; no legacy `NFE+1` conversion |
 | Python | Project-managed 3.12.15, including development headers | Installed in the dedicated target venv |
 | Torch / CUDA wheels | Pinned source requires Torch 2.12.0; target installation uses cu130 | Installed; targeted native GPU tests passed; resolved freeze recorded |

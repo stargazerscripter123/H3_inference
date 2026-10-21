@@ -1,0 +1,671 @@
+{
+  "run": {
+    "mode": "validate",
+    "status": "failed",
+    "fastvideo_revision": "cdda1b7535fe32699335e39db82c1d4db21ceb88",
+    "expected_qad_revision": "f01e6a23ac6066aa9eb622cf94b6259442e70ec2",
+    "model_revision_verification": "external download manifest required",
+    "model_dir": "/home/isaac/workdir/h3/models/FastH3-Omni-NVFP4-QAD-f01e6a23",
+    "model_contract_sha256": "68577f23f0c866e329aa8a578b2455e4ca9a26a3ca1d15ddd6d0e99091007e18",
+    "decoder": "/home/isaac/workdir/h3/models/FastH3-Omni-NVFP4-QAD-f01e6a23/vae_decoder_nvfp4/decoder-nvfp4.safetensors",
+    "requests_json_sha256": "7575131ab0fd481ab989cffbd999a66cb9c84cefb37f88afa88450d1def3e236",
+    "num_gpus": 1,
+    "tp_size": 1,
+    "sp_size": 1,
+    "fsdp": false,
+    "configured_transformer_forwards": 8,
+    "measured_transformer_forwards": null,
+    "frame_geometry": [
+      832,
+      480
+    ],
+    "fps": 24,
+    "contract": {
+      "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+      "audio_scheduler_shift": 3.0,
+      "base_model_revision": "hf://MiniMaxAI/MiniMax-H3@9bfb6693f2cf6de171db46d1aa586f67d773a1da",
+      "conditioning": "fixed_ordered_references_target_only_flow",
+      "grid_max_t": 0.999,
+      "guidance_scale": 1.0,
+      "model_type": "ref2va",
+      "num_inference_steps": 8,
+      "pdd_step_indices": [
+        0,
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28,
+        32
+      ],
+      "pdd_steps": 32,
+      "schema": "fasth3-inference-contract-v1",
+      "schema_version": "fasth3-inference-contract-v1",
+      "transformer_component": "transformer_ref",
+      "transformer_forwards": 8,
+      "video_scheduler_shift": 12.0,
+      "vsa_ref_keep_rate": 0.1,
+      "vsa_ref_policy": "p2_multi_region",
+      "vsa_sparsity": 0.9,
+      "vsa_tile_size": 128
+    },
+    "requests": [
+      {
+        "id": "S1_image_124",
+        "prompt": "Keep the character and lighting from the reference image. The man slowly raises his eyes, takes a breath, and looks to his left. The camera holds a steady close-up. Natural quiet ambient sound.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          }
+        ],
+        "num_frames": 124,
+        "seed": 2124,
+        "phase": "smoke"
+      },
+      {
+        "id": "S2_multi_image_124",
+        "prompt": "Keep the man from the first image and the laboratory setting from the second and third images. He turns toward the workbench and carefully places an object on the table. Preserve the reference appearances and natural lighting. Quiet room ambience.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          },
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          },
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-240.png"
+          }
+        ],
+        "num_frames": 124,
+        "seed": 2125,
+        "phase": "smoke"
+      },
+      {
+        "id": "S3_image_audio_124",
+        "prompt": "Use the character appearance from the image and the voice characteristics from the audio reference. The man calmly says: We need more time. Show natural mouth motion and subtle head movement in a steady close-up.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          },
+          {
+            "media_type": "audio",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-audio-055.wav"
+          }
+        ],
+        "num_frames": 124,
+        "seed": 2126,
+        "phase": "smoke"
+      },
+      {
+        "id": "S4_image_video_124",
+        "prompt": "Use the character appearance from the first image and the camera motion and laboratory atmosphere from the video reference. The character looks around the room and slowly turns toward the camera. Natural room ambience.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          },
+          {
+            "media_type": "video",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-video-055.mp4"
+          }
+        ],
+        "num_frames": 124,
+        "seed": 2127,
+        "phase": "smoke"
+      },
+      {
+        "id": "S1_image_362",
+        "prompt": "Keep the character and lighting from the reference image. The man slowly raises his eyes, takes a breath, and looks to his left. The camera holds a steady close-up. Natural quiet ambient sound.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          }
+        ],
+        "num_frames": 362,
+        "seed": 2362,
+        "phase": "smoke"
+      },
+      {
+        "id": "S2_multi_image_362",
+        "prompt": "Keep the man from the first image and the laboratory setting from the second and third images. He turns toward the workbench and carefully places an object on the table. Preserve the reference appearances and natural lighting. Quiet room ambience.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          },
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          },
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-240.png"
+          }
+        ],
+        "num_frames": 362,
+        "seed": 2363,
+        "phase": "smoke"
+      },
+      {
+        "id": "S3_image_audio_362",
+        "prompt": "Use the character appearance from the image and the voice characteristics from the audio reference. The man calmly says: We need more time. Show natural mouth motion and subtle head movement in a steady close-up.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          },
+          {
+            "media_type": "audio",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-audio-055.wav"
+          }
+        ],
+        "num_frames": 362,
+        "seed": 2364,
+        "phase": "smoke"
+      },
+      {
+        "id": "S4_image_video_362",
+        "prompt": "Use the character appearance from the first image and the camera motion and laboratory atmosphere from the video reference. The character looks around the room and slowly turns toward the camera. Natural room ambience.",
+        "references": [
+          {
+            "media_type": "image",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          },
+          {
+            "media_type": "video",
+            "source": "/home/isaac/workdir/h3/inputs/tos/reference-video-055.mp4"
+          }
+        ],
+        "num_frames": 362,
+        "seed": 2365,
+        "phase": "smoke"
+      }
+    ],
+    "torch_version": "2.12.0+cu130",
+    "torch_cuda": "13.0",
+    "environment": {
+      "FASTVIDEO_FA4": "0",
+      "FASTVIDEO_STAGE_LOGGING": "1",
+      "FASTVIDEO_LOG_ALL_PROCESSES": "1",
+      "FASTVIDEO_HOST_IP": "127.0.0.1",
+      "FASTVIDEO_H3_SP_PROFILE": "0",
+      "FASTVIDEO_H3_ADALN_TABLE": "/home/isaac/workdir/h3/models/FastH3-Omni-NVFP4-QAD-f01e6a23/tables/omni-qad-8nfe.pt",
+      "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3",
+      "FASTVIDEO_H3_VSA_FP4": "1",
+      "FASTVIDEO_H3_VSA_FP4_PREFIX": "fp8",
+      "FASTVIDEO_H3_VSA_FP4_TWO_LEVEL_P": "1",
+      "FASTVIDEO_H3_VSA_FP4_K_SMOOTH": "1",
+      "FASTVIDEO_H3_GATE_CHUNK_ROWS": "8192",
+      "FASTVIDEO_MINIMAX_H3_FUSIONS": "all",
+      "FASTVIDEO_VSA_TRITON": "1",
+      "FASTVIDEO_VSA_PTX_BLACKWELL": "0",
+      "FASTVIDEO_ULYSSES_A2A": "auto",
+      "FASTVIDEO_MINIMAX_H3_EXACT_KERNELS": "all",
+      "FASTVIDEO_H3_VSA_HEADS_FIRST_TILE": "1",
+      "FASTVIDEO_H3_VAE_TILE_PARALLEL": "1",
+      "FASTVIDEO_H3_REF2VA_MEMO_ENTRIES": "16",
+      "FASTVIDEO_H3_VAE_TILE_BATCH": "4",
+      "FASTVIDEO_H3_VAE_NVFP4_DECODER": "/home/isaac/workdir/h3/models/FastH3-Omni-NVFP4-QAD-f01e6a23/vae_decoder_nvfp4/decoder-nvfp4.safetensors"
+    },
+    "input_table": {
+      "blocks": 50,
+      "keys_per_block": 16,
+      "tensors": 800,
+      "bytes": 522858951,
+      "sha256": "08f166279f8660b7ea688182684abe9c5e06a31e646e34da4507f710d4fffbe9",
+      "clock_entries": [
+        {
+          "key": "((0.0009999871253967285, 0.9990000128746033), (2, 2688), 'torch.float32')",
+          "shape": [
+            2,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.0009999871253967285, 0.9990000128746033, 1.0), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.012752950191497803, 0.04640907049179077, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.012752950191497803, 0.04640907049179077, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.02799999713897705, 0.10089999437332153, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.02799999713897705, 0.10089999437332153, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.04857140779495239, 0.16750001907348633, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.04857140779495239, 0.16750001907348633, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.07784616947174072, 0.25075000524520874, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.07784616947174072, 0.25075000524520874, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.12282925844192505, 0.357785701751709, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.12282925844192505, 0.357785701751709, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.20080000162124634, 0.500499963760376, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.20080000162124634, 0.500499963760376, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.3690526485443115, 0.7002999782562256, 0.9990000128746033), (3, 2688), 'torch.float32')",
+          "shape": [
+            3,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        },
+        {
+          "key": "((0.3690526485443115, 0.7002999782562256, 0.9990000128746033, 1.0), (4, 2688), 'torch.float32')",
+          "shape": [
+            4,
+            96768
+          ],
+          "embedding_dtype": "torch.float32",
+          "modulation_dtype": "torch.bfloat16"
+        }
+      ]
+    },
+    "generator_startup_seconds": 12.137614587001735,
+    "error": "CUDA OOM in prefix dense attention k/v index_select; request998MiB, device free785.69MiB,28.02GiB allocated,1.80GiB reserved but unallocated. Full diagnostic retained on target host.",
+    "total_wall_seconds": 378.2456010859896,
+    "error_sha256": "17dee131208f0318e375a9a5c0b0b6efb631f0f128ca9819bc62c6b7e7d9fdbe"
+  },
+  "requests": [
+    {
+      "id": "S1_image_124",
+      "phase": "smoke",
+      "seed": 2124,
+      "num_frames": 124,
+      "configured_transformer_forwards": 8,
+      "measured_transformer_forwards": null,
+      "output": "/home/isaac/workdir/h3/outputs/adaln-validate-sp1-001/000_S1_image_124.mp4",
+      "generation_wall_seconds": 68.83046264600125,
+      "reported_generation_seconds": 68.66564372499124,
+      "reported_e2e_seconds_including_save": 68.82198345499637,
+      "reported_rank0_peak_allocated_mb": 16907.548828125,
+      "reported_peak_scope": "executor value after stage resets; not whole-request peak",
+      "rank0_stages": {
+        "input_preparation_stage": {
+          "peak_allocated_mb": 15714.0478515625,
+          "peak_reserved_mb": 16156.0,
+          "execution_time": 0.056972040998516604,
+          "timestamp": 1792568239.5681925,
+          "stage_class": "MiniMaxH3InputPreparationStage"
+        },
+        "conditioning_stage": {
+          "peak_allocated_mb": 17972.9384765625,
+          "peak_reserved_mb": 19660.0,
+          "execution_time": 2.809159639000427,
+          "timestamp": 1792568242.3779705,
+          "stage_class": "MiniMaxH3ConditioningStage",
+          "component_metric": "text_encoder_time_s"
+        },
+        "latent_preparation_stage": {
+          "peak_allocated_mb": 16485.03759765625,
+          "peak_reserved_mb": 19660.0,
+          "execution_time": 2.580496848007897,
+          "timestamp": 1792568256.367937,
+          "stage_class": "MiniMaxH3LatentPreparationStage",
+          "component_metric": "vae_encode_time_s"
+        },
+        "denoising_stage": {
+          "peak_allocated_mb": 21036.958984375,
+          "peak_reserved_mb": 25580.0,
+          "execution_time": 47.62254622399632,
+          "timestamp": 1792568303.9961975,
+          "stage_class": "MiniMaxH3DenoisingStage",
+          "component_metric": "dit_time_s"
+        },
+        "video_decoding_stage": {
+          "peak_allocated_mb": 17159.64208984375,
+          "peak_reserved_mb": 25582.0,
+          "execution_time": 2.8690715940028895,
+          "timestamp": 1792568306.8659952,
+          "stage_class": "MiniMaxH3VideoDecodingStage",
+          "component_metric": "vae_decode_time_s"
+        },
+        "audio_decoding_stage": {
+          "peak_allocated_mb": 17030.73388671875,
+          "peak_reserved_mb": 18524.0,
+          "execution_time": 0.054938592002145015,
+          "timestamp": 1792568306.9349823,
+          "stage_class": "MiniMaxH3AudioDecodingStage",
+          "component_metric": "audio_decode_time_s"
+        },
+        "PostDecodeFrameProcessStage": {
+          "execution_time": 0.010528423998039216,
+          "timestamp": 1792568306.9461253
+        },
+        "VideoSaveStage": {
+          "execution_time": 0.1453449289983837,
+          "timestamp": 1792568307.09166
+        },
+        "AudioMuxStage": {
+          "execution_time": 0.0,
+          "timestamp": 1792568307.0916772
+        }
+      },
+      "rank0_max_stage_peak_allocated_mb": 21036.958984375,
+      "stage_peak_scope": "stage windows; first request may include model initialization",
+      "per_rank_peak_allocated_mb": null,
+      "media": {
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "sample_rate": 32000,
+        "channels": 2,
+        "video_duration": 5.166667,
+        "audio_duration": 5.166656,
+        "bytes": 1132546
+      },
+      "media_validation_seconds": 0.06310468599258456,
+      "status": "passed"
+    },
+    {
+      "id": "S2_multi_image_124",
+      "phase": "smoke",
+      "seed": 2125,
+      "num_frames": 124,
+      "configured_transformer_forwards": 8,
+      "measured_transformer_forwards": null,
+      "output": "/home/isaac/workdir/h3/outputs/adaln-validate-sp1-001/001_S2_multi_image_124.mp4",
+      "generation_wall_seconds": 204.17109452599834,
+      "reported_generation_seconds": 204.02728384701186,
+      "reported_e2e_seconds_including_save": 204.16058535000775,
+      "reported_rank0_peak_allocated_mb": 17549.64404296875,
+      "reported_peak_scope": "executor value after stage resets; not whole-request peak",
+      "rank0_stages": {
+        "input_preparation_stage": {
+          "peak_allocated_mb": 16907.548828125,
+          "peak_reserved_mb": 18524.0,
+          "execution_time": 0.16808487199887168,
+          "timestamp": 1792568311.0569427,
+          "stage_class": "MiniMaxH3InputPreparationStage"
+        },
+        "conditioning_stage": {
+          "peak_allocated_mb": 23278.70263671875,
+          "peak_reserved_mb": 28066.0,
+          "execution_time": 6.601578775997041,
+          "timestamp": 1792568317.6591377,
+          "stage_class": "MiniMaxH3ConditioningStage",
+          "component_metric": "text_encoder_time_s"
+        },
+        "latent_preparation_stage": {
+          "peak_allocated_mb": 17872.0859375,
+          "peak_reserved_mb": 28066.0,
+          "execution_time": 5.202682675997494,
+          "timestamp": 1792568323.9523041,
+          "stage_class": "MiniMaxH3LatentPreparationStage",
+          "component_metric": "vae_encode_time_s"
+        },
+        "denoising_stage": {
+          "peak_allocated_mb": 25959.72412109375,
+          "peak_reserved_mb": 30962.0,
+          "execution_time": 185.616441620994,
+          "timestamp": 1792568509.5698557,
+          "stage_class": "MiniMaxH3DenoisingStage",
+          "component_metric": "dit_time_s"
+        },
+        "video_decoding_stage": {
+          "peak_allocated_mb": 18059.10986328125,
+          "peak_reserved_mb": 29110.0,
+          "execution_time": 1.5751863369951025,
+          "timestamp": 1792568511.1458473,
+          "stage_class": "MiniMaxH3VideoDecodingStage",
+          "component_metric": "vae_decode_time_s"
+        },
+        "audio_decoding_stage": {
+          "peak_allocated_mb": 17679.087890625,
+          "peak_reserved_mb": 19940.0,
+          "execution_time": 0.037313602995709516,
+          "timestamp": 1792568511.1995063,
+          "stage_class": "MiniMaxH3AudioDecodingStage",
+          "component_metric": "audio_decode_time_s"
+        },
+        "PostDecodeFrameProcessStage": {
+          "execution_time": 0.009210144009557553,
+          "timestamp": 1792568511.20924
+        },
+        "VideoSaveStage": {
+          "execution_time": 0.12369527600822039,
+          "timestamp": 1792568511.3330846
+        },
+        "AudioMuxStage": {
+          "execution_time": 0.0,
+          "timestamp": 1792568511.3331
+        }
+      },
+      "rank0_max_stage_peak_allocated_mb": 25959.72412109375,
+      "stage_peak_scope": "stage windows; first request may include model initialization",
+      "per_rank_peak_allocated_mb": null,
+      "media": {
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "sample_rate": 32000,
+        "channels": 2,
+        "video_duration": 5.166667,
+        "audio_duration": 5.166656,
+        "bytes": 1643096
+      },
+      "media_validation_seconds": 0.07324914699711371,
+      "status": "passed"
+    },
+    {
+      "id": "S3_image_audio_124",
+      "phase": "smoke",
+      "seed": 2126,
+      "num_frames": 124,
+      "configured_transformer_forwards": 8,
+      "measured_transformer_forwards": null,
+      "output": "/home/isaac/workdir/h3/outputs/adaln-validate-sp1-001/002_S3_image_audio_124.mp4",
+      "generation_wall_seconds": 55.46659380100027,
+      "reported_generation_seconds": 55.33434066499467,
+      "reported_e2e_seconds_including_save": 55.456029091990786,
+      "reported_rank0_peak_allocated_mb": 17618.59765625,
+      "reported_peak_scope": "executor value after stage resets; not whole-request peak",
+      "rank0_stages": {
+        "input_preparation_stage": {
+          "peak_allocated_mb": 17549.64404296875,
+          "peak_reserved_mb": 19940.0,
+          "execution_time": 0.057254753992310725,
+          "timestamp": 1792568512.9569118,
+          "stage_class": "MiniMaxH3InputPreparationStage"
+        },
+        "conditioning_stage": {
+          "peak_allocated_mb": 19706.2607421875,
+          "peak_reserved_mb": 22416.0,
+          "execution_time": 1.7903286660002777,
+          "timestamp": 1792568514.747786,
+          "stage_class": "MiniMaxH3ConditioningStage",
+          "component_metric": "text_encoder_time_s"
+        },
+        "latent_preparation_stage": {
+          "peak_allocated_mb": 18168.53955078125,
+          "peak_reserved_mb": 22416.0,
+          "execution_time": 0.05765079600678291,
+          "timestamp": 1792568516.0310452,
+          "stage_class": "MiniMaxH3LatentPreparationStage",
+          "component_metric": "vae_encode_time_s"
+        },
+        "denoising_stage": {
+          "peak_allocated_mb": 22190.10546875,
+          "peak_reserved_mb": 27740.0,
+          "execution_time": 48.98734725298709,
+          "timestamp": 1792568565.0191116,
+          "stage_class": "MiniMaxH3DenoisingStage",
+          "component_metric": "dit_time_s"
+        },
+        "video_decoding_stage": {
+          "peak_allocated_mb": 18143.84423828125,
+          "peak_reserved_mb": 27742.0,
+          "execution_time": 1.6737074420088902,
+          "timestamp": 1792568566.6986904,
+          "stage_class": "MiniMaxH3VideoDecodingStage",
+          "component_metric": "vae_decode_time_s"
+        },
+        "audio_decoding_stage": {
+          "peak_allocated_mb": 17742.15673828125,
+          "peak_reserved_mb": 20412.0,
+          "execution_time": 0.04274817500845529,
+          "timestamp": 1792568566.7580526,
+          "stage_class": "MiniMaxH3AudioDecodingStage",
+          "component_metric": "audio_decode_time_s"
+        },
+        "PostDecodeFrameProcessStage": {
+          "execution_time": 0.009899354990920983,
+          "timestamp": 1792568566.7686465
+        },
+        "VideoSaveStage": {
+          "execution_time": 0.11133094799879473,
+          "timestamp": 1792568566.8800824
+        },
+        "AudioMuxStage": {
+          "execution_time": 0.0,
+          "timestamp": 1792568566.8800988
+        }
+      },
+      "rank0_max_stage_peak_allocated_mb": 22190.10546875,
+      "stage_peak_scope": "stage windows; first request may include model initialization",
+      "per_rank_peak_allocated_mb": null,
+      "media": {
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "sample_rate": 32000,
+        "channels": 2,
+        "video_duration": 5.166667,
+        "audio_duration": 5.166656,
+        "bytes": 932843
+      },
+      "media_validation_seconds": 0.05704585200874135,
+      "status": "passed"
+    },
+    {
+      "id": "S4_image_video_124",
+      "phase": "smoke",
+      "seed": 2127,
+      "num_frames": 124,
+      "configured_transformer_forwards": 8,
+      "measured_transformer_forwards": null,
+      "output": "/home/isaac/workdir/h3/outputs/adaln-validate-sp1-001/003_S4_image_video_124.mp4",
+      "status": "failed",
+      "error": "CUDA OOM in prefix dense attention k/v index_select; request998MiB, device free785.69MiB,28.02GiB allocated,1.80GiB reserved but unallocated. Full diagnostic retained on target host.",
+      "elapsed_until_failure_seconds": 37.42814761098998,
+      "error_sha256": "17dee131208f0318e375a9a5c0b0b6efb631f0f128ca9819bc62c6b7e7d9fdbe"
+    }
+  ],
+  "unrun": [
+    "S1_image_362",
+    "S2_multi_image_362",
+    "S3_image_audio_362",
+    "S4_image_video_362"
+  ],
+  "interpretation": "First3passed; fourthimagevideo124failed after priorGPUmemoentries;362notrun. Not a warm benchmark."
+}

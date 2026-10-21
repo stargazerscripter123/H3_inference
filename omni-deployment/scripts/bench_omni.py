@@ -42,12 +42,16 @@ def summarize(results: list[dict], threshold: float) -> list[dict]:
             groups[key].append(result)
     output = []
     for key, members in sorted(groups.items()):
-        times = sorted(x["client_to_media_s"] for x in members if x["ok"])
+        attempted = [x for x in members if x.get("attempted", True)]
+        in_progress = sum(x.get("outcome") == "in_progress" for x in attempted)
+        times = sorted(x["client_to_media_s"] for x in attempted if x["ok"])
+        failed = sum(not x["ok"] and x.get("outcome") != "in_progress" for x in attempted)
         on_time = sum(value <= threshold for value in times)
         output.append({
             "case_id": key[0], "cache_condition": key[1], "width": key[2], "height": key[3], "frames": key[4],
-            "requests": len(members), "valid": len(times), "failed": len(members) - len(times),
-            "valid_on_time": on_time, "valid_on_time_rate": on_time / len(members),
+            "planned": len(members), "attempted": len(attempted), "not_run": len(members) - len(attempted),
+            "in_progress": in_progress, "requests": len(attempted), "valid": len(times), "failed": failed,
+            "valid_on_time": on_time, "valid_on_time_rate": on_time / len(attempted) if attempted else None,
             "threshold_s": threshold,
             "p50_s_successes_only": statistics.median(times) if times else None,
             "p95_s_successes_only": times[math.ceil(0.95 * len(times)) - 1] if times else None,
@@ -55,6 +59,19 @@ def summarize(results: list[dict], threshold: float) -> list[dict]:
             "timing_scope": "client submission through complete media download; local validation excluded",
         })
     return output
+
+
+def refresh_report(report: dict, threshold: float) -> None:
+    ledger = report["plan_ledger"]
+    report["attempted_requests"] = sum(row["attempted"] for row in ledger)
+    report["completed_requests"] = sum(row["outcome"] in {"succeeded", "failed"} for row in ledger)
+    report["failed_requests"] = sum(row["outcome"] == "failed" for row in ledger)
+    report["in_progress_requests"] = sum(row["outcome"] == "in_progress" for row in ledger)
+    report["not_run_requests"] = sum(not row["attempted"] for row in ledger)
+    report["unrun_requests"] = report["not_run_requests"]
+    report["planned_measured_requests"] = sum(row["phase"] == "measured" for row in ledger)
+    report["attempted_measured_requests"] = sum(row["phase"] == "measured" and row["attempted"] for row in ledger)
+    report["summary"] = summarize(ledger, threshold)
 
 
 def main() -> int:
@@ -99,26 +116,44 @@ def main() -> int:
         root = a.output_root.resolve() / (datetime.now(timezone.utc).strftime("bench_%Y%m%dT%H%M%SZ_") + uuid.uuid4().hex[:12])
         root.mkdir(parents=True, exist_ok=False)
         run_omni.save_json(root / "plan.json", raw)
-        report = {"plan_sha256": run_omni.sha256_file(a.plan), "server": server,
-                  "model": a.model, "planned_requests": len(ready), "results": [], "summary": []}
+        ledger = []
         for index, (item, case_id, condition, payload, audit) in enumerate(ready):
-            result = {"index": index, "name": item.get("name", str(index)),
-                      "phase": item["phase"], "case_id": case_id, "cache_condition": condition,
-                      "frames": payload["num_frames"], "width": payload["width"], "height": payload["height"],
-                      "seed": payload["seed"], "ok": False}
+            ledger.append({"index": index, "name": item.get("name", str(index)),
+                           "phase": item["phase"], "case_id": case_id, "cache_condition": condition,
+                           "frames": payload["num_frames"], "width": payload["width"], "height": payload["height"],
+                           "seed": payload["seed"], "ok": False, "attempted": False,
+                           "outcome": "not_run", "not_run_reason": "not_submitted"})
+        report = {"schema_version": 2, "plan_sha256": run_omni.sha256_file(a.plan), "server": server,
+                  "model": a.model, "planned_requests": len(ready), "plan_ledger": ledger,
+                  "attempted_definition": "client run_job started; not proof of HTTP acceptance",
+                  "results": [], "summary": []}
+        refresh_report(report, a.threshold)
+        run_omni.save_json(root / "report.json", report)
+        for index, (item, case_id, condition, payload, audit) in enumerate(ready):
+            result = ledger[index]
+            result.update(attempted=True, outcome="in_progress", not_run_reason=None)
+            refresh_report(report, a.threshold)
+            run_omni.save_json(root / "report.json", report)
             try:
                 manifest = run_omni.run_job(server, payload, audit, output_root=root,
                                            timeout=a.timeout, poll_interval=a.poll_interval,
                                            cache_condition=condition)
-                result.update(ok=True, manifest_path=manifest["manifest_path"],
+                result.update(ok=True, outcome="succeeded", manifest_path=manifest["manifest_path"],
+                              request_id=manifest.get("request_id"),
                               client_to_media_s=manifest["timings"]["client_to_media_s"])
-            except run_omni.ClientError as error:
-                result["error"] = str(error)
+            except (run_omni.ClientError, OSError, ValueError) as error:
+                result.update(outcome="failed", error=str(error))
+                failed_manifest = getattr(error, "manifest", None)
+                if failed_manifest is not None:
+                    result.update({field: failed_manifest.get(field) for field in (
+                        "manifest_path", "request_id", "failed_phase", "server_may_still_be_running")})
+                    result["server_job_status"] = failed_manifest.get("server_job", {}).get("status")
                 print(f"FAILED {result['name']}: {error}", file=sys.stderr)
             report["results"].append(result)
-            report["summary"] = summarize(report["results"], a.threshold)
-            report["completed_requests"] = len(report["results"])
-            report["unrun_requests"] = len(ready) - len(report["results"])
+            if not result["ok"]:
+                for remaining in ledger[index + 1:]:
+                    remaining.update(not_run_reason="fail_fast_after_request", blocked_by_index=index)
+            refresh_report(report, a.threshold)
             run_omni.save_json(root / "report.json", report)
             # A failed/unknown submission can leave an active job. Default
             # fail-fast avoids queueing a second request behind unknown work.

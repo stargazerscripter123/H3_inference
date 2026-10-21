@@ -170,5 +170,16 @@ SHA-256。输入 hashing 在 client timer 之前发生；两配置保持相同�
   ffprobe；0.25 秒 polling 会影响观测粒度。API 的 inference time 不是完整服务耗时。
 - 现有 benchmark 遇失败会停止，不自动重试或取消服务任务。失败保留在已执行组的
   分母中，未执行行单独报告；必须按完整矩阵核对实际完成数。
+  `report.json` 在第一次提交前保存完整 `plan_ledger`，每行分别记录 `not_run`、
+  `in_progress`、`succeeded` 或 `failed`；后续未执行行带有导致停止的行索引。
+  每组统计显式列出 planned/attempted/failed/not_run；正式尝试为零时成功率为 null。
+  `attempted` 表示客户端开始执行该行，不证明服务器已接受；未知服务器状态保留
+  request_id、manifest_path、failed_phase 和 server_may_still_be_running。
+  例如 S4 预热 OOM 时，失败的是预热行，S4 四条正式行都是 not_run，不能记成四次正式失败。
+  恢复后另存子计划与新输出目录，关联原 plan SHA、行索引、case/seed/cache 条件，
+  保留失败尝试，不覆盖或用重跑成功替换。重启会清空进程缓存，补跑 fixed-ref 前必须
+  显式重新预热相同参考；已有素材不能未经说明继续标为同进程 warm-new。
+  HTTP 轮询返回 4xx 也不证明服务器工作停止；先核对已保存 job ID/服务日志与资源状态，
+  再决定恢复。不要仅凭 /health 的进程存活信息推断 GPU collective 已退出。
 - 自动媒体校验只覆盖编码、帧数、尺寸、音轨等；未做身份、动作、对白、口型或美学
   评判，不读取任何 `data/`，本轮也没有浏览图片内容。

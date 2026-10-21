@@ -66,6 +66,12 @@ def main() -> None:
                 raise RuntimeError("Refusing to reuse an unexpected Ray runtime")
             # Force a new local instance; never attach to RAY_ADDRESS or ray://.
             os.environ.pop("RAY_ADDRESS", None)
+            # Ray normalizes loopback to a local interface. Choose that address
+            # before ray.init so the driver AND its child workers inherit it.
+            os.environ.pop("FASTVIDEO_HOST_IP", None)
+            from fastvideo.utils import get_ip
+            node_address = get_ip()
+            os.environ["FASTVIDEO_HOST_IP"] = node_address
             private_ray = ray
             ray.init(
                 address="local",
@@ -75,11 +81,12 @@ def main() -> None:
                 include_dashboard=False,
                 namespace=f"h3-omni-{args.owner_token}",
                 _temp_dir=f"/tmp/h3-omni-{os.getuid()}-{args.owner_token[:8]}",
-                _node_ip_address="127.0.0.1",
+                _node_ip_address=node_address,
             )
             # Ray may normalize loopback to the local interface address.
             # FastVideo pins its first placement bundle to node:<get_ip()>.
-            os.environ["FASTVIDEO_HOST_IP"] = private_ray_node_address(ray)
+            if private_ray_node_address(ray) != node_address:
+                raise RuntimeError("Private Ray normalized the chosen node address unexpectedly")
             from omni_ray_health import install_ray_health_adapter
             install_ray_health_adapter()
             resources = ray.cluster_resources()
