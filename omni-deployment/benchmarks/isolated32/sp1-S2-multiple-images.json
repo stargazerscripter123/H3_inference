@@ -1,0 +1,117 @@
+{
+  "protocol": "isolated32-v1",
+  "profile": "sp1",
+  "case_id": "S2-multiple-images",
+  "source_plan_sha256": "2ed444da57ebd696aa6a6f43d4c08aa60ac7ba3024c70f4d6a8bf13322d34a13",
+  "service_before_case": "fresh; explicit first warmup; no hidden retry",
+  "vae_offload": true,
+  "expandable_segments": true,
+  "sp_profile": false,
+  "requests": [
+    {
+      "name": "S2-multiple-images-w",
+      "case_id": "S2-multiple-images",
+      "phase": "warmup",
+      "cache_condition": "unspecified",
+      "prompt": "Use the visual appearances and setting in <Picture 1> and <Picture 2>. Create one continuous cinematic shot with natural movement. Keep the camera movement gentle throughout this preparatory take.",
+      "seed": 9000,
+      "frames": 362,
+      "width": 832,
+      "height": 480,
+      "references": [
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_w_image_1.png"
+        },
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_w_image_2.png"
+        }
+      ]
+    },
+    {
+      "name": "S2-multiple-images-new-1",
+      "case_id": "S2-multiple-images",
+      "phase": "measured",
+      "cache_condition": "warm-new",
+      "prompt": "Use the visual appearances and setting in <Picture 1> and <Picture 2>. Create one continuous cinematic shot with natural movement. Keep the camera movement slow and steady throughout the shot.",
+      "seed": 1234,
+      "frames": 362,
+      "width": 832,
+      "height": 480,
+      "references": [
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_a_image_1.png"
+        },
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_a_image_2.png"
+        }
+      ]
+    },
+    {
+      "name": "S2-multiple-images-new-2",
+      "case_id": "S2-multiple-images",
+      "phase": "measured",
+      "cache_condition": "warm-new",
+      "prompt": "Use the visual appearances and setting in <Picture 1> and <Picture 2>. Create one continuous cinematic shot with natural movement. Maintain a gentle, continuous camera move from beginning to end.",
+      "seed": 5678,
+      "frames": 362,
+      "width": 832,
+      "height": 480,
+      "references": [
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_1.png"
+        },
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_2.png"
+        }
+      ]
+    },
+    {
+      "name": "S2-multiple-images-fixed-1",
+      "case_id": "S2-multiple-images",
+      "phase": "measured",
+      "cache_condition": "warm-fixed-ref",
+      "prompt": "Use the visual appearances and setting in <Picture 1> and <Picture 2>. Create one continuous cinematic shot with natural movement. Use a smooth, unhurried camera move across the entire scene.",
+      "seed": 1234,
+      "frames": 362,
+      "width": 832,
+      "height": 480,
+      "references": [
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_1.png"
+        },
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_2.png"
+        }
+      ]
+    },
+    {
+      "name": "S2-multiple-images-fixed-2",
+      "case_id": "S2-multiple-images",
+      "phase": "measured",
+      "cache_condition": "warm-fixed-ref",
+      "prompt": "Use the visual appearances and setting in <Picture 1> and <Picture 2>. Create one continuous cinematic shot with natural movement. Let the camera drift steadily while keeping the motion natural.",
+      "seed": 5678,
+      "frames": 362,
+      "width": 832,
+      "height": 480,
+      "references": [
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_1.png"
+        },
+        {
+          "type": "image",
+          "source": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_2.png"
+        }
+      ]
+    }
+  ]
+}

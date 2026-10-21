@@ -4,6 +4,10 @@
 Omni NVFP4 QAD，独立于旧 ComfyUI/vLLM 产线。最终验收范围和限制见
 [README](README.md) 与 [validation](validation/)。人工画面/声音检查仍需用户完成。
 
+目标机env文件默认启用已验证的 `OMNI_VAE_OFFLOAD=1` 和
+`OMNI_EXPANDABLE_SEGMENTS=1`，用于多参考长视频。要复现实验中的原生常驻VAE，
+请在source前显式把两者export为0；切换时先stop。
+
 ## 启动双卡服务
 
 ```bash

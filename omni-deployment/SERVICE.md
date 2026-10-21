@@ -124,9 +124,10 @@ restarting. The package never runs a global `ray stop` or kills arbitrary GPU PI
 
 SP2 creates Ray with `address="local"`, a private namespace/temp directory,
 2 GPUs, 8 CPUs and a 4 GiB object store. It does not connect to an existing Ray
-cluster. After initialization the launcher verifies the current Ray node and uses its
-advertised address for FastVideo placement constraints; Ray can normalize a
-requested loopback address. The HTTP service remains bound to loopback.
+cluster. Before Ray initialization the launcher resolves the local node address and
+sets it for both the driver and child workers; after initialization it verifies
+the exact current-node resource and address. Ray can normalize loopback, so
+changing only the driver after startup is insufficient. The HTTP service remains bound to loopback.
 The object store cap is not a cap on all host memory: model loading,
 pinned TE buffers, Python workers and activations must still be monitored.
 Upstream `OpenAIServingEngine` already serializes requests with an asyncio lock.
@@ -158,9 +159,10 @@ check; a completed smoke request remains necessary to test GPU execution.
   precedence over unrelated executables in the inherited PATH, current Ray node
   resource matching, strict memory flags, allocator sanitization at validation
   and process startup, and distinct fingerprints for all four memory variants.
-- GPU load, Ray startup/shutdown, API smoke and performance require target-host
-  verification. `validate` additionally invokes pinned upstream config-to-engine
-  conversion with the real target environment before any service startup.
+- Target-host native SP2 READY, five complete video/audio requests and normal
+  shutdown passed; three-image 362 failed during the first forward. See validation
+  evidence for exact limits. The low-memory variant passed three-image, image+video and image+audio
+  at 362 frames plus image124. Formal performance is still under test. `validate` invokes actual config-to-engine conversion before startup.
 
 Source basis: `examples/serving/openai_fasth3_omniref_rtx5090.yaml`,
 `examples/inference/basic/basic_fasth3_omniref_pdd.py`, `fastvideo/api/schema.py`,

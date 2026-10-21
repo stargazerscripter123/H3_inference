@@ -11,8 +11,12 @@ All 47 pinned model assets (68,579,945,084 bytes) are verified; the two-mode
 AdaLN table is prepared with eight completed forwards per diagnostic request.
 Fresh SP1 table reuse passed image, multi-image and image+audio at 124 frames;
 the fourth image+video request failed with a prefix-attention CUDA OOM. The
-362-frame cases were not run in that sequence. SP2 service integration and
-formal warm timing remain in progress; output quality requires human review.
+362-frame cases were not run in that sequence. Native SP2 served four 124-frame scenarios and single-image 362 frames;
+three-image 362 failed during the first forward (zero completed), leaving the
+remaining two scenarios unrun. The VAE-offload + expandable-allocator variant passed three-image, image+video
+and image+audio at 362 frames, plus image124. The target env file now selects
+this tested low-memory recipe by default; controller defaults remain native.
+Formal timing is in progress; output quality requires human review.
 See [validation](validation/) for numerical evidence and
 [ENVIRONMENT.md](ENVIRONMENT.md) for source-kernel and environment provenance.
 
@@ -27,7 +31,7 @@ See [validation](validation/) for numerical evidence and
 | Torch / CUDA wheels | Pinned source requires Torch 2.12.0; target installation uses cu130 | Installed; targeted native GPU tests passed; resolved freeze recorded |
 | FastVideo kernel | Build from the fixed FastVideo source; PyPI 0.3.5 predates the required sparse FP4 API | Built from pinned source for sm120a; targeted numerical tests passed |
 | CUDA build tools | NVCC 13.0.88 and CCCL 13.0.85 | Installed with env-local development-library links; source build passed |
-| Ray | Source requires `>=2.49.1`; health adapter reviewed against 2.49.1 | Installed Ray2.59.0; private GCS ALIVE probe passed; full SP2 serving still pending |
+| Ray | Source requires `>=2.49.1`; health adapter reviewed against 2.49.1 | Installed Ray2.59.0; private GCS ALIVE probe passed; native SP2 READY, five media requests and normal shutdown passed; memory variant under test |
 | Optional FA4 stack | Source pins FlashAttention `14c377950125c70b7a9dabf9c561fca53715ac7d`, CuTe DSL `4.6.0.dev0`, quack `0.5.3` | These are upstream requirements, not an installed lock; serving recipe sets `FASTVIDEO_FA4=0` |
 
 The new host reports Pop!_OS 24.04, driver 595.104.02, about 125 GiB RAM, GPU0
@@ -381,7 +385,8 @@ python3 -m unittest discover -s tests -p 'test_omni_resource_monitor.py' -v
 python3 -m py_compile scripts/omni_control.py scripts/omni_service.py scripts/omni_ray_health.py scripts/prepare_omni_adaln.py scripts/run_omni.py scripts/bench_omni.py
 ```
 
-Observed locally: 12 lifecycle/health/toolchain tests and 14 client/benchmark tests passed;
+Observed locally: 19 lifecycle/health/toolchain, 2 Ray startup, 5 AdaLN,
+6 resource monitor and 16 client/benchmark tests passed (48 total);
 Python compilation passed; both final JSON templates parsed with the pinned
 upstream `ServeConfig` parser. The client tests mock HTTP/media operations and
 do not execute GPUs. Target `omni_control.py validate` additionally checks the

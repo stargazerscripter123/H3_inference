@@ -1,0 +1,55 @@
+{
+  "protocol": "isolated32-v1",
+  "measured": 32,
+  "warmup": 8,
+  "case_count": 8,
+  "profile_order": [
+    "sp2",
+    "sp1"
+  ],
+  "case_order_note": "fixed, not randomized; only2measuredpercachegroup; p95=max is not SLA",
+  "failure_policy": "first error stops that case; preserve failed/not_run; stop ownedservice before nextcase; abort orchestration on lifecycle failure",
+  "quality": "human review required; never open image files in agent context",
+  "jobs": [
+    {
+      "profile": "sp2",
+      "case_id": "S1-single-image",
+      "plan": "omni-deployment/benchmarks/isolated32/sp2-S1-single-image.json"
+    },
+    {
+      "profile": "sp2",
+      "case_id": "S2-multiple-images",
+      "plan": "omni-deployment/benchmarks/isolated32/sp2-S2-multiple-images.json"
+    },
+    {
+      "profile": "sp2",
+      "case_id": "S3-image-audio",
+      "plan": "omni-deployment/benchmarks/isolated32/sp2-S3-image-audio.json"
+    },
+    {
+      "profile": "sp2",
+      "case_id": "S4-image-video",
+      "plan": "omni-deployment/benchmarks/isolated32/sp2-S4-image-video.json"
+    },
+    {
+      "profile": "sp1",
+      "case_id": "S1-single-image",
+      "plan": "omni-deployment/benchmarks/isolated32/sp1-S1-single-image.json"
+    },
+    {
+      "profile": "sp1",
+      "case_id": "S2-multiple-images",
+      "plan": "omni-deployment/benchmarks/isolated32/sp1-S2-multiple-images.json"
+    },
+    {
+      "profile": "sp1",
+      "case_id": "S3-image-audio",
+      "plan": "omni-deployment/benchmarks/isolated32/sp1-S3-image-audio.json"
+    },
+    {
+      "profile": "sp1",
+      "case_id": "S4-image-video",
+      "plan": "omni-deployment/benchmarks/isolated32/sp1-S4-image-video.json"
+    }
+  ]
+}

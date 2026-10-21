@@ -489,7 +489,7 @@
         "client_elapsed_s": 6.033692540993798
       },
       "server_model": null,
-      "error_summary": "CUDA OOM before first forward in compiled QKV conversion, shape(3,86142,28,128) BF16; request1.73GiB/free725.88MiB/allocated25.18GiB/reserved-unallocated3.89GiB",
+      "error_summary": "CUDA OOM inside first DiT forward (zero completed forwards) in compiled QKV conversion, shape(3,86142,28,128) BF16; request1.73GiB/free725.88MiB/allocated25.18GiB/reserved-unallocated3.89GiB",
       "full_error_sha256": "cf071c372fbfe80d12f3ec1b47d99e9cc6856463f3d396d0c62eda0cf1530d3a"
     },
     {
@@ -667,7 +667,8 @@
               "feed_forward": 1022.3,
               "block_total": 11755.8
             }
-          ]
+          ],
+          "request_name": "S4_image_video_124"
         },
         {
           "completed_forwards": 8,
@@ -819,7 +820,8 @@
               "feed_forward": 359.3,
               "block_total": 3668.2
             }
-          ]
+          ],
+          "request_name": "S1_image_124"
         },
         {
           "completed_forwards": 8,
@@ -971,7 +973,8 @@
               "feed_forward": 847.0,
               "block_total": 13688.8
             }
-          ]
+          ],
+          "request_name": "S2_multi_image_124"
         },
         {
           "completed_forwards": 8,
@@ -1123,7 +1126,8 @@
               "feed_forward": 368.5,
               "block_total": 3803.9
             }
-          ]
+          ],
+          "request_name": "S3_image_audio_124"
         },
         {
           "completed_forwards": 8,
@@ -1275,12 +1279,14 @@
               "feed_forward": 789.2,
               "block_total": 8070.1
             }
-          ]
+          ],
+          "request_name": "S1_image_362"
         },
         {
           "completed_forwards": 0,
           "stage_completed": false,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S2_multi_image_362"
         }
       ],
       "note": "H3_STAGE_MS emits rank0 only; rank1 count0 does not imply no execution"
@@ -1291,34 +1297,46 @@
       "log_sha256": "81c65dbc61b59fa6225aa96515d99e6ceba8b3cfa452147c181f4896fe875040",
       "segments": [
         {
-          "completed_forwards": 0,
+          "completed_forwards": null,
           "stage_completed": true,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S4_image_video_124",
+          "measurement_note": "Not exposed on this rank; H3_STAGE_MS is emitted only by rank0"
         },
         {
-          "completed_forwards": 0,
+          "completed_forwards": null,
           "stage_completed": true,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S1_image_124",
+          "measurement_note": "Not exposed on this rank; H3_STAGE_MS is emitted only by rank0"
         },
         {
-          "completed_forwards": 0,
+          "completed_forwards": null,
           "stage_completed": true,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S2_multi_image_124",
+          "measurement_note": "Not exposed on this rank; H3_STAGE_MS is emitted only by rank0"
         },
         {
-          "completed_forwards": 0,
+          "completed_forwards": null,
           "stage_completed": true,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S3_image_audio_124",
+          "measurement_note": "Not exposed on this rank; H3_STAGE_MS is emitted only by rank0"
         },
         {
-          "completed_forwards": 0,
+          "completed_forwards": null,
           "stage_completed": true,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S1_image_362",
+          "measurement_note": "Not exposed on this rank; H3_STAGE_MS is emitted only by rank0"
         },
         {
-          "completed_forwards": 0,
+          "completed_forwards": null,
           "stage_completed": false,
-          "stage_ms": []
+          "stage_ms": [],
+          "request_name": "S2_multi_image_362",
+          "measurement_note": "Not exposed on this rank; H3_STAGE_MS is emitted only by rank0"
         }
       ],
       "note": "H3_STAGE_MS emits rank0 only; rank1 count0 does not imply no execution"
@@ -1334,5 +1352,6 @@
     "sampling_errors": 0,
     "scope": "includes failed startup, restart, all diagnostic requests and shutdown; whole-device/system sampled lower-bound peaks, not allocator"
   },
-  "quality": "human review pending; no pixels opened"
+  "quality": "human review pending; no pixels opened",
+  "timing_scope": "Sequential functional diagnostic requests with profiling enabled and changing reference/compilation/cache history; first request includes lazy module loading. Not a controlled steady-state or cold-start benchmark."
 }
