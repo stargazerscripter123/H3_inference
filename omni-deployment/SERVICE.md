@@ -122,6 +122,12 @@ longer. `stop --force` is an explicit emergency KILL of that owned process group
 after emergency shutdown inspect GPU processes for leftover Ray workers before
 restarting. The package never runs a global `ray stop` or kills arbitrary GPU PIDs.
 
+Automated operators can pass `stop --expected-owner-token TOKEN`, using the token
+returned by their own `start`. Under the lifecycle lock, the controller rejects
+missing state or a different token before checking process ownership or sending
+any signal. This prevents stopping a replacement service between a prior status
+check and the stop command. Manual `stop` without this option is unchanged.
+
 SP2 creates Ray with `address="local"`, a private namespace/temp directory,
 2 GPUs, 8 CPUs and a 4 GiB object store. It does not connect to an existing Ray
 cluster. Before Ray initialization the launcher resolves the local node address and
@@ -152,13 +158,14 @@ check; a completed smoke request remains necessary to test GPU execution.
 
 - Both final templates parsed through the pinned upstream `ServeConfig` parser.
 - Python compilation passed.
-- Nineteen CPU-only service/controller tests passed: Ray handles without `proc`, failed/restarting or
+- Twenty-one CPU-only service/controller tests passed: Ray handles without `proc`, failed/restarting or
   missing actors, GCS failure, shutdown/error state, MP fallback, PID reuse and
   owner/group/token mismatch refusal, venv executable symlink preservation,
   CUDA/media defaults and overrides, relative-path refusal, and project-tool
   precedence over unrelated executables in the inherited PATH, current Ray node
   resource matching, strict memory flags, allocator sanitization at validation
-  and process startup, and distinct fingerprints for all four memory variants.
+  and process startup, distinct fingerprints for all four memory variants, and
+  expected-owner-token checks before process ownership checks and signals.
 - Target-host native SP2 READY, five complete video/audio requests and normal
   shutdown passed; three-image 362 failed during the first forward. See validation
   evidence for exact limits. The low-memory variant passed three-image, image+video and image+audio

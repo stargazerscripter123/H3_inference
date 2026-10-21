@@ -1,5 +1,7 @@
 """CPU-only safety/compatibility tests; no GPU, Ray, network or service startup."""
 from pathlib import Path
+from contextlib import redirect_stdout
+import io
 import json
 import os
 import shutil
@@ -256,6 +258,60 @@ class OwnershipTest(unittest.TestCase):
             alias = Path(directory) / "venv-python"
             alias.symlink_to(sys.executable)
             self.assertEqual(control.absolute(str(alias), "OMNI_PYTHON", follow_symlinks=False), alias)
+
+
+class StopOwnerTokenTest(unittest.TestCase):
+    def test_main_rejects_missing_or_replaced_state_before_ownership_or_signals(self):
+        for state in (None, {"owner_token": "replacement-token"}):
+            for force in (False, True):
+                with self.subTest(state=state, force=force), tempfile.TemporaryDirectory() as directory:
+                    argv = ["omni_control.py", "stop", "--expected-owner-token", "original-token"]
+                    if force:
+                        argv.append("--force")
+                    with patch.dict(os.environ, {"H3_OMNI_ROOT": directory}, clear=True), \
+                            patch.object(control.sys, "platform", "linux"), \
+                            patch.object(control.sys, "argv", argv), \
+                            patch.object(control, "read_state", return_value=state), \
+                            patch.object(control, "owned") as owned, \
+                            patch.object(control.os, "kill") as kill, \
+                            patch.object(control.os, "killpg") as killpg:
+                        with self.assertRaisesRegex(RuntimeError, "Expected owner token.*refusing stop"):
+                            control.main()
+                        owned.assert_not_called()
+                        kill.assert_not_called()
+                        killpg.assert_not_called()
+
+    def test_main_matching_token_and_manual_stop_keep_existing_stop_behavior(self):
+        for expected_token in (None, "original-token"):
+            for force in (False, True):
+                with self.subTest(expected_token=expected_token, force=force), \
+                        tempfile.TemporaryDirectory() as directory:
+                    run = Path(directory) / "run/omni"
+                    run.mkdir(parents=True)
+                    state = {"pid": 123, "pgid": 123, "owner_token": "original-token"}
+                    (run / "service.json").write_text(json.dumps(state))
+                    argv = ["omni_control.py", "stop"]
+                    if expected_token is not None:
+                        argv.extend(["--expected-owner-token", expected_token])
+                    if force:
+                        argv.append("--force")
+                    output = io.StringIO()
+                    with patch.dict(os.environ, {"H3_OMNI_ROOT": directory}, clear=True), \
+                            patch.object(control.sys, "platform", "linux"), \
+                            patch.object(control.sys, "argv", argv), \
+                            patch.object(control, "owned", side_effect=[True, False, False]), \
+                            patch.object(control.os, "kill") as kill, \
+                            patch.object(control.os, "killpg") as killpg, redirect_stdout(output):
+                        control.main()
+                    if force:
+                        kill.assert_not_called()
+                        killpg.assert_called_once_with(123, control.signal.SIGKILL)
+                    else:
+                        kill.assert_called_once_with(123, control.signal.SIGTERM)
+                        killpg.assert_not_called()
+                    self.assertEqual(json.loads(output.getvalue())["status"], "STOPPED")
+                    self.assertFalse((run / "service.json").exists())
+                    self.assertTrue((run / "stopped-original-token.json").is_file())
 
 
 if __name__ == "__main__":

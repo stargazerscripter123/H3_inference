@@ -286,7 +286,10 @@ def main() -> None:
     parser.add_argument("profile", nargs="?", choices=("sp1", "sp2"), default="sp1")
     parser.add_argument("--force", action="store_true", help="After ownership checks, kill only this service's process group")
     parser.add_argument("--stop-timeout", type=int, default=90)
+    parser.add_argument("--expected-owner-token", help="Stop only the service with this owner token, checked under the lifecycle lock")
     args = parser.parse_args()
+    if args.expected_owner_token is not None and args.action != "stop":
+        parser.error("--expected-owner-token is only valid for stop")
     root = absolute(os.environ.get("H3_OMNI_ROOT", "/home/isaac/workdir/h3"), "H3_OMNI_ROOT")
     run = root / "run/omni"
     if args.action == "render":
@@ -306,6 +309,9 @@ def main() -> None:
             result = start(args.profile, run)
         else:
             state = read_state(run)
+            if args.action == "stop" and args.expected_owner_token is not None:
+                if not state or state.get("owner_token") != args.expected_owner_token:
+                    raise RuntimeError("Expected owner token does not match current service state; refusing stop")
             if not state or not owned(state):
                 result = {"status": "STOPPED", "state": state}
             elif args.action == "status":
