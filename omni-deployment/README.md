@@ -6,19 +6,14 @@ image/video/audio generation requests and sequential benchmarks. SP2 means
 sequence parallelism with replicated NVFP4 weights and parallel VAE; TP stays 1.
 Two 32-GB cards do not become one 64-GB memory pool.
 
-**Status on 2026-10-21:** 48 CPU tests and targeted GPU/operator tests passed.
-All 47 pinned model assets (68,579,945,084 bytes) are verified; the two-mode
-AdaLN table is prepared with eight completed forwards per diagnostic request.
-Fresh SP1 table reuse passed image, multi-image and image+audio at 124 frames;
-the fourth image+video request failed with a prefix-attention CUDA OOM. The
-362-frame cases were not run in that sequence. Native SP2 served four 124-frame scenarios and single-image 362 frames;
-three-image 362 failed during the first forward (zero completed), leaving the
-remaining two scenarios unrun. The VAE-offload + expandable-allocator variant passed three-image, image+video
-and image+audio at 362 frames, plus image124. The target env file now selects
-this tested low-memory recipe by default; controller defaults remain native.
-Formal timing is in progress; output quality requires human review.
-See [validation](validation/) for numerical evidence and
-[ENVIRONMENT.md](ENVIRONMENT.md) for source-kernel and environment provenance.
+**Status on 2026-10-21:** The pinned environment, model assets, AdaLN table and
+SP2 generation path have been verified. At the user's request, the former test
+case plans and video/statistics outputs have been removed from current
+acceptance. Evaluation now uses real business requests across reference-image
+cap480, cap720 and original-size policies, with fixed 480p output. These new
+business results are pending; historical synthetic timings do not establish
+business latency or quality. See [the evaluation contract](benchmarks/README.md).
+Environment and immutable model evidence remain in [ENVIRONMENT.md](ENVIRONMENT.md).
 
 ## Fixed source and model versions
 

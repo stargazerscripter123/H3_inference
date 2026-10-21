@@ -2,7 +2,7 @@
 
 当前实际根目录为 `/home/isaac/workdir/h3`。这是 FastVideo 原生 FastH3
 Omni NVFP4 QAD，独立于旧 ComfyUI/vLLM 产线。最终验收范围和限制见
-[README](README.md) 与 [validation](validation/)。人工画面/声音检查仍需用户完成。
+[README](README.md) 与 [业务评测协议](benchmarks/README.md)。人工画面/声音检查仍需用户完成。
 
 目标机env文件默认启用已验证的 `OMNI_VAE_OFFLOAD=1` 和
 `OMNI_EXPANDABLE_SEGMENTS=1`，用于多参考长视频。要复现实验中的原生常驻VAE，
@@ -22,25 +22,21 @@ source omni-deployment/env.popos-5090.sh
 表示两个 worker 的存活和模型身份已核对，首次生成仍可能需要加载/JIT。
 同配置健康服务会复用；切换配置前先用下方 stop。API 仅监听本机 `127.0.0.1:8108`。
 
-## 一条图像参考请求
+## 业务请求与三组参考图
 
-下面使用已校验的 Tears of Steel 授权素材。8 次 PDD forward、24 fps、
-832×480、32 kHz 双声道；`--frames 124` 对应约 5.17 秒视频。
+旧测试用例已移除。真实请求和素材保存在私有、Git忽略的运行目录，不提交到公开仓库。
+保持原prompt与参考图顺序；三组分别设置cap480、cap720和original，均输出
+480×832、362帧/24fps、8次PDD、32kHz双声道。720上限经32像素对齐实际为704；
+小图不放大。original保留源尺寸，仅做必要对齐，不采用官方2048放大。
 
-```bash
-"$OMNI_PYTHON" omni-deployment/scripts/run_omni.py \
-  --image /home/isaac/workdir/h3/inputs/tos/tos_first.png \
-  --prompt 'Keep the appearance of <Picture 1>. The character turns slowly toward the camera. Natural quiet ambient sound.' \
-  --frames 124 --seed 1234 \
-  --output-root /home/isaac/workdir/h3/outputs/omni-manual
-```
+首次使用新策略前，停止服务并显式应用[版本补丁](SERVICE.md#reference-image-size-policy)。
+启动前设置`OMNI_REFERENCE_IMAGE_RESIZE_POLICY=cap`与
+`OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE=480`或`720`；原图组使用`original`与`0`。
+默认target env为cap480，改变策略必须stop/start。
 
-客户端会输出唯一目录、完整 MP4 和 `manifest.json`，并校验视频帧数、画布、
-帧率、音频采样率与声道。数值校验不代表人工质量通过。再次测试请换 seed。
-图像、视频、音频参数按类型依次排列，同类保持顺序；可重复 `--image`，
-再传 `--video`，最后 `--audio`。参考文件必须位于当前允许的 `inputs/` 内。
-最长 362 帧约 15.08 秒；它是输出时长，不能与生成延迟混淆。多参考和长视频
-的显存边界以实测验收记录为准。
+每个case/策略fresh服务，1条首推+3条warm，原prompt固定、seed轮换。
+计时至完整MP4写盘，模型启动和回传Mac另计；失败、未运行不计为零延迟。
+独立首帧conditioning与普通reference不等价，迁移请求时明确记录这个能力差异。
 
 ## 停止和排查
 
@@ -59,5 +55,4 @@ source omni-deployment/env.popos-5090.sh
 [benchmarks](benchmarks/README.md) 中显式预热/测量计划。诊断模式 1 会增加
 CUDA event/synchronize，不能和正式成绩混用。失败、未运行和成功分开记录。
 
-质量抽帧只保存于目标机，由用户查看；agent 不打开图片。已有准备/SP1产物的
-抽帧索引为 `outputs/omni-quality-002/manifest.json`，其中标明源视频和帧路径。
+质量抽帧只保存于目标机，由用户查看；agent 不打开图片。新业务视频与统计另存新目录，旧用例不再参与评测。

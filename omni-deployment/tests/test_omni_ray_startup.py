@@ -5,6 +5,7 @@ The simulated worker snapshots its inherited address at ray.init, so a later
 driver-only fix cannot make this test pass.
 """
 from pathlib import Path
+import json
 import os
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import omni_service
+import omni_reference_patch
 
 
 class RayStartupAddressTest(unittest.TestCase):
@@ -69,7 +71,9 @@ class RayStartupAddressTest(unittest.TestCase):
                   health_adapter=health_adapter, serve=serve)
 
     def invoke_main(self, source: Path, fixture):
-        arguments = ["omni_service.py", "--source", str(source), "--config", "unused-config.json",
+        config = source / "config.json"
+        config.write_text(json.dumps({"generator": {"pipeline": {"experimental": {}}}}))
+        arguments = ["omni_service.py", "--source", str(source), "--config", str(config),
                      "--owner-token", "test-owned-runtime"]
         # Every external boundary used by main is replaced; no git command or
         # production import can escape the test. Restore sys.path after main.
@@ -77,6 +81,7 @@ class RayStartupAddressTest(unittest.TestCase):
                 patch.dict(os.environ, {"FASTVIDEO_HOST_IP": "127.0.0.1", "RAY_ADDRESS": "ray://stale.invalid:10001"}, clear=True), \
                 patch.object(sys, "argv", arguments), patch.object(sys, "path", list(sys.path)), \
                 patch.object(omni_service.signal, "signal"), \
+                patch.object(omni_reference_patch, "inspect_patch", return_value={"state": "native"}), \
                 patch.object(omni_service.subprocess, "check_output", return_value=omni_service.FASTVIDEO_COMMIT + "\n"), \
                 patch("builtins.print"):
             omni_service.main()

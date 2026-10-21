@@ -45,6 +45,10 @@ def main() -> None:
     ).strip()
     if actual != FASTVIDEO_COMMIT:
         raise RuntimeError(f"FastVideo commit mismatch: {actual}")
+    from omni_reference_patch import inspect_patch
+    raw_config = json.loads(Path(args.config).read_text())
+    policy = raw_config["generator"]["pipeline"]["experimental"].get("h3_reference_image_resize_policy", "native")
+    inspect_patch(source, required=policy != "native")
     # The checkout is explicit; a different editable install must not win.
     sys.path.insert(0, str(source))
     from fastvideo.entrypoints.cli.inference_config import build_serve_config

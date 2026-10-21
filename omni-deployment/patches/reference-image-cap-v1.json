@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "cdda1b7535fe32699335e39db82c1d4db21ceb88",
+  "patch_file": "reference-image-cap-v1.patch",
+  "files": {
+    "fastvideo/configs/pipelines/minimax_h3.py": {
+      "before_sha256": "502433863307d097688f9a198b849a5a0dbefb0a06503776c407faf115d64115",
+      "after_sha256": "885e7649838113c144e2155927853ad47aa3979d6212fb14feb6f3a4c0bfc364"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/reference.py": {
+      "before_sha256": "8502e999700dfcd3f812563c848d0fc29084c07e340c53deb655a2c9040eb040",
+      "after_sha256": "2dbd14d68d21849c1f1eb4d15e3dbf393efb6438a7ce35ac12a042230e5d474a"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_input_preparation.py": {
+      "before_sha256": "18b59fb5e6ff49815083cb364dfa519bfd549d52146622ba4820b327ff77da21",
+      "after_sha256": "642c1eb67c08cf927808440023ede3852e002bc3e325d81ff207d00046c8a064"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py": {
+      "before_sha256": "fa6a45be92056a5f23fa48db8d088fee83aa29f90a89e652954608e13c437d5e",
+      "after_sha256": "33d4deabb4e79c65e65dc7393b97949584437fd57b715101f36fea1ac3c60b1a"
+    }
+  },
+  "patch_sha256": "77b08c6f464688b8f2a8d3509ac055412e6f3bcf82409f9bcc08a0bf4de2a054"
+}

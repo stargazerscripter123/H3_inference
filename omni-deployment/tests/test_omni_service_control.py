@@ -129,6 +129,24 @@ class ToolchainSettingsTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, name + " must be 0 or 1"):
                         control.settings("sp2")
 
+    def test_reference_policies_preserve_native_and_accept_720_cap(self):
+        for policy, cap in (("native", "0"), ("original", "0"), ("cap", "480"), ("cap", "720")):
+            with self.subTest(policy=policy, cap=cap), patch.dict(os.environ, {
+                    **self.asset_env(Path("/deploy/h3")), "OMNI_REFERENCE_IMAGE_RESIZE_POLICY": policy,
+                    "OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE": cap}, clear=True):
+                config, _, _ = control.settings("sp2")
+            fields = config["generator"]["pipeline"]["experimental"]
+            self.assertEqual(fields.get("h3_reference_image_resize_policy", "native"), policy)
+            self.assertEqual(fields.get("h3_reference_image_max_short_edge"), int(cap) if policy == "cap" else None)
+
+    def test_reference_invalid_or_ambiguous_policy_rejected(self):
+        for policy, cap in (("cap", "0"), ("cap", "31"), ("cap", "0480"), ("cap", "480.0"),
+                            ("cap", " 480"), ("cap", ""), ("native", "480"), ("original", "720"), ("bad", "0")):
+            with self.subTest(policy=policy, cap=cap), patch.dict(os.environ, {
+                    **self.asset_env(Path("/deploy/h3")), "OMNI_REFERENCE_IMAGE_RESIZE_POLICY": policy,
+                    "OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE": cap}, clear=True), self.assertRaises(ValueError):
+                control.settings("sp2")
+
     def test_validation_subprocess_cannot_inherit_allocator_aliases(self):
         for enabled, expected in (("0", "backend:native"), ("1", "expandable_segments:True")):
             shell_env = {**self.asset_env(Path("/deploy/h3")), "OMNI_EXPANDABLE_SEGMENTS": enabled,
@@ -165,6 +183,7 @@ class ToolchainSettingsTest(unittest.TestCase):
                 with self.subTest(vae=vae, expandable=expandable), \
                         patch.dict(os.environ, shell_env, clear=True), \
                         patch.object(control, "asset_identity", return_value={"verified": True}), \
+                        patch.object(control, "inspect_patch", return_value={"state": "native"}), \
                         patch.object(control, "sha256", return_value="a" * 64), \
                         patch.object(control, "read_state", return_value=None), \
                         patch.object(control.socket, "socket"), patch.object(control, "validate"), \
@@ -262,6 +281,24 @@ class OwnershipTest(unittest.TestCase):
 
 
 class StopOwnerTokenTest(unittest.TestCase):
+    def test_explicit_stop_cleans_exited_owned_record_without_signals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run/omni"
+            run.mkdir(parents=True)
+            state = {"pid": 123, "owner_token": "original-token"}
+            (run / "service.json").write_text(json.dumps(state))
+            with patch.dict(os.environ, {"H3_OMNI_ROOT": directory}, clear=True), \
+                    patch.object(control.sys, "platform", "linux"), \
+                    patch.object(control.sys, "argv", ["omni_control.py", "stop", "--expected-owner-token", "original-token"]), \
+                    patch.object(control, "owned", return_value=False), \
+                    patch.object(control.os, "kill") as kill, patch.object(control.os, "killpg") as killpg, \
+                    redirect_stdout(io.StringIO()):
+                control.main()
+            kill.assert_not_called()
+            killpg.assert_not_called()
+            self.assertFalse((run / "service.json").exists())
+            self.assertTrue((run / "stopped-original-token.json").exists())
+
     def test_main_rejects_missing_or_replaced_state_before_ownership_or_signals(self):
         for state in (None, {"owner_token": "replacement-token"}):
             for force in (False, True):

@@ -22,6 +22,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from omni_reference_patch import inspect_patch
+
 HERE = Path(__file__).resolve().parent
 PIN = "cdda1b7535fe32699335e39db82c1d4db21ceb88"
 RECIPE_ENV = {
@@ -98,6 +100,22 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
             raise ValueError(f"{name} must be 0 or 1")
         flags[name] = value == "1"
     config["generator"]["engine"]["offload"]["vae"] = flags["OMNI_VAE_OFFLOAD"]
+    policy = os.environ.get("OMNI_REFERENCE_IMAGE_RESIZE_POLICY", "native")
+    if policy not in {"native", "cap", "original"}:
+        raise ValueError("OMNI_REFERENCE_IMAGE_RESIZE_POLICY must be native, cap or original")
+    cap_text = os.environ.get("OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE", "0")
+    if not cap_text.isascii() or not cap_text.isdecimal() or cap_text != str(int(cap_text)):
+        raise ValueError("OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE must be a canonical nonnegative integer")
+    cap = int(cap_text)
+    if policy == "cap" and cap < 32:
+        raise ValueError("cap policy requires OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE >= 32")
+    if policy != "cap" and cap:
+        raise ValueError("Only cap policy accepts OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE")
+    experimental = config["generator"]["pipeline"]["experimental"]
+    if policy != "native":
+        experimental["h3_reference_image_resize_policy"] = policy
+    if policy == "cap":
+        experimental["h3_reference_image_max_short_edge"] = cap
     port = int(os.environ.get("OMNI_PORT", "8108"))
     if not 1024 <= port <= 65535:
         raise ValueError("OMNI_PORT must be between 1024 and 65535")
@@ -243,7 +261,9 @@ def start(profile: str, run: Path) -> dict:
     config, env, paths = settings(profile)
     identity = {"config": config, "env": env, "paths": paths, "pin": PIN,
                 "assets": asset_identity(config, env), "launcher_sha256": sha256(HERE / "omni_service.py"),
-                "health_adapter_sha256": sha256(HERE / "omni_ray_health.py")}
+                "health_adapter_sha256": sha256(HERE / "omni_ray_health.py"),
+                "reference_patch": inspect_patch(Path(paths["source"]), required=bool(
+                    config["generator"]["pipeline"]["experimental"].get("h3_reference_image_resize_policy", "native") != "native"))}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     name = f"fasth3-omni-qad-{profile}-{digest[:12]}"
     config["server"]["served_model_name"] = name
@@ -321,6 +341,10 @@ def main() -> None:
                     raise RuntimeError("Expected owner token does not match current service state; refusing stop")
             if not state or not owned(state):
                 result = {"status": "STOPPED", "state": state}
+                if args.action == "stop" and state:
+                    state["stopped_at"] = time.time()
+                    atomic_json(run / f"stopped-{state['owner_token']}.json", state)
+                    (run / "service.json").unlink()
             elif args.action == "status":
                 result = {**state, **probe(state)}
             else:

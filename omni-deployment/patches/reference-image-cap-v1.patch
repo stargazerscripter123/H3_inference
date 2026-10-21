@@ -1,0 +1,218 @@
+--- a/fastvideo/configs/pipelines/minimax_h3.py
++++ b/fastvideo/configs/pipelines/minimax_h3.py
+@@ -192,9 +192,22 @@
+     # for PDD students. None takes the checkpoint's trained value; another value
+     # overrides it with a warning.
+     vsa_ref_keep_rate: float | None = None
++    # Native preserves the released 2048-short-edge reference image path.
++    # Cap/original never upscale and disable the image processor's own resize.
++    h3_reference_image_resize_policy: str = "native"
++    h3_reference_image_max_short_edge: int | None = None
+ 
+     def check_pipeline_config(self) -> None:
+         super().check_pipeline_config()
++        policy = self.h3_reference_image_resize_policy
++        cap = self.h3_reference_image_max_short_edge
++        if policy not in ("native", "cap", "original"):
++            raise ValueError("h3_reference_image_resize_policy must be native, cap, or original.")
++        if policy == "cap":
++            if type(cap) is not int or cap < 32:
++                raise ValueError("h3_reference_image_max_short_edge must be an integer >= 32 for cap policy.")
++        elif cap is not None:
++            raise ValueError("h3_reference_image_max_short_edge must be None for native/original policy.")
+         if self.flow_shift is not None:
+             raise ValueError("MiniMax-H3 uses separate checkpoint-defined video/audio scheduler shifts; "
+                              "flow_shift must remain unset.")
+--- a/fastvideo/pipelines/basic/minimax_h3/reference.py
++++ b/fastvideo/pipelines/basic/minimax_h3/reference.py
+@@ -14,6 +14,7 @@
+ from PIL import Image, ImageOps
+ import torch
+ 
++from fastvideo.logger import init_logger
+ from fastvideo.models.vision_utils import load_image
+ from fastvideo.pipelines.basic.minimax_h3.packing import (
+     MINIMAX_H3_AUDIO_CHANNELS,
+@@ -32,6 +33,8 @@
+ MINIMAX_H3_MAX_REFERENCE_VIDEOS = 3
+ MINIMAX_H3_MAX_REFERENCE_AUDIOS = 3
+ MINIMAX_H3_MAX_REFERENCES = 12
++
++logger = init_logger(__name__)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -180,12 +183,41 @@
+     return result, float(rate), soundtrack
+ 
+ 
+-def resolve_reference_image_size(width: int, height: int) -> tuple[int, int]:
+-    """Resolve the released 2048-short-edge reference-image canvas."""
++def resolve_reference_image_size(width: int,
++                                 height: int,
++                                 max_short_edge: int | None = None,
++                                 resize_policy: str = "native") -> tuple[int, int]:
++    """Resolve a reference canvas with explicit native, cap, or original policy.
++
++    Cap/original first align the short edge down, scale both axes from that
++    edge, then align the long edge down. Neither axis grows; orientation and
++    accepted aspect bounds are preserved. Long-edge rounding is less than 32
++    pixels below the ideal proportional resize. Native retains the released
++    2048-short-edge behavior exactly, including its small-image upscaling.
++    """
+     if width <= 0 or height <= 0:
+         raise ValueError(f"A reference image must have a positive size, got {width}x{height}.")
+     if width > 4 * height or height > 4 * width:
+         raise ValueError(f"A reference image must be within 1:4 and 4:1, got {width}x{height}.")
++    if resize_policy not in ("native", "cap", "original"):
++        raise ValueError("Reference image resize_policy must be native, cap, or original.")
++    multiple = MINIMAX_H3_CANVAS_MULTIPLE
++    if resize_policy == "cap":
++        if type(max_short_edge) is not int or max_short_edge < multiple:
++            raise ValueError(f"Reference image max_short_edge must be an integer >= {multiple} for cap policy.")
++    elif max_short_edge is not None:
++        raise ValueError("Reference image max_short_edge must be None for native/original policy.")
++    if resize_policy != "native":
++        if type(width) is not int or type(height) is not int or min(width, height) < multiple:
++            raise ValueError(
++                f"Non-native reference image dimensions must be integers >= {multiple}, got {width}x{height}.")
++        short_edge = min(width, height)
++        requested_short_edge = short_edge if max_short_edge is None else min(short_edge, max_short_edge)
++        aligned_short_edge = requested_short_edge // multiple * multiple
++        return (
++            height * aligned_short_edge // (short_edge * multiple) * multiple,
++            width * aligned_short_edge // (short_edge * multiple) * multiple,
++        )
+     scale = MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE / min(width, height)
+     multiple = MINIMAX_H3_CANVAS_MULTIPLE
+     return (
+@@ -319,6 +351,9 @@
+     reference: MiniMaxH3Reference,
+     num_frames: int,
+     target_sample_rate: int,
++    *,
++    image_max_short_edge: int | None = None,
++    image_resize_policy: str = "native",
+ ) -> MiniMaxH3PreparedReference:
+     """Decode and normalize one deferred Ref2VA medium."""
+     prepared = MiniMaxH3PreparedReference(media_type=reference.media_type)
+@@ -331,7 +366,15 @@
+                 raise ValueError(f"An image reference must be RGB, got {tuple(pixels.shape)}.")
+             image = Image.fromarray(pixels)
+         image = ImageOps.exif_transpose(image).convert("RGB")
+-        height, width = resolve_reference_image_size(*image.size)
++        height, width = resolve_reference_image_size(image.width,
++                                                     image.height,
++                                                     max_short_edge=image_max_short_edge,
++                                                     resize_policy=image_resize_policy)
++        if image_resize_policy != "native":
++            logger.info(
++                "H3_REFERENCE_IMAGE_GEOMETRY policy=%s source_width=%d source_height=%d prepared_width=%d "
++                "prepared_height=%d max_short_edge=%s multiple=%d", image_resize_policy, image.width, image.height,
++                width, height, image_max_short_edge, MINIMAX_H3_CANVAS_MULTIPLE)
+         prepared.image = prepare_reference_image(image, height, width)
+         return prepared
+ 
+--- a/fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_input_preparation.py
++++ b/fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_input_preparation.py
+@@ -192,7 +192,10 @@
+             for index, (_, image) in enumerate(raw_keyframes)
+         ]
+ 
+-    def _prepare_ref2va(self, batch: ForwardBatch) -> None:
++    def _prepare_ref2va(self,
++                        batch: ForwardBatch,
++                        image_max_short_edge: int | None = None,
++                        image_resize_policy: str = "native") -> None:
+         if batch.image_path is not None or batch.pil_image is not None or batch.last_image is not None:
+             raise ValueError("MiniMax-H3 Ref2VA accepts media through `references`, not FL2VA keyframe fields.")
+         references = validate_references(list(batch.references or []))
+@@ -202,17 +205,23 @@
+         height, width, ratio = resolve_target_canvas(batch, self.vae, (16, 9))
+         num_frames = resolve_target_num_frames(batch.num_frames)
+         target_sample_rate = int(self.audio_vae.sampling_rate)
+-        batch.references = [prepare_reference(reference, num_frames, target_sample_rate) for reference in references]
++        batch.references = [
++            prepare_reference(reference,
++                              num_frames,
++                              target_sample_rate,
++                              image_max_short_edge=image_max_short_edge,
++                              image_resize_policy=image_resize_policy) for reference in references
++        ]
+         self._write_target_geometry(batch, height, width, ratio, num_frames)
+         batch.extra[MINIMAX_H3_KEYFRAMES_KEY] = []
+         batch.extra[MINIMAX_H3_KEYFRAME_ANCHORS_KEY] = ()
+ 
+     @torch.no_grad()
+     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
+-        del fastvideo_args
+         prepare_common_request(batch)
+         if self.ref2va:
+-            self._prepare_ref2va(batch)
++            self._prepare_ref2va(batch, fastvideo_args.pipeline_config.h3_reference_image_max_short_edge,
++                                 fastvideo_args.pipeline_config.h3_reference_image_resize_policy)
+         else:
+             self._prepare_fl2va(batch)
+         return batch
+--- a/fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py
++++ b/fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py
+@@ -199,7 +199,10 @@
+             image_grid_thw=image_grid_thw,
+         )
+ 
+-    def _encode_ref2va(self, batch: ForwardBatch, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
++    def _encode_ref2va(self,
++                       batch: ForwardBatch,
++                       device: torch.device,
++                       image_resize_policy: str = "native") -> tuple[torch.Tensor, torch.Tensor]:
+         if not isinstance(batch.prompt, str):
+             raise ValueError("MiniMax H3 requires `prompt` to be a single string.")
+         references = list(batch.references or [])
+@@ -211,15 +214,19 @@
+         has_video = any(reference.media_type == "video" for reference in references)
+         images_ready = all(reference.image is not None for reference in references if reference.media_type == "image")
+         if self._ref2va_memo.enabled and not has_video and images_ready:
+-            key = (str(device), batch.prompt,
++            key = (str(device), batch.prompt, ("image_resize_policy", image_resize_policy),
+                    tuple((reference.media_type, bool(reference.has_audio),
+                           image_key(reference.image) if reference.media_type == "image" else None)
+                          for reference in references))
+-            return self._ref2va_memo.get_or_compute(key, lambda: self._present_ref2va(batch, references, device))
+-        return self._present_ref2va(batch, references, device)
+-
+-    def _present_ref2va(self, batch: ForwardBatch, references: list[MiniMaxH3PreparedReference],
+-                        device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
++            return self._ref2va_memo.get_or_compute(
++                key, lambda: self._present_ref2va(batch, references, device, image_resize_policy))
++        return self._present_ref2va(batch, references, device, image_resize_policy)
++
++    def _present_ref2va(self,
++                        batch: ForwardBatch,
++                        references: list[MiniMaxH3PreparedReference],
++                        device: torch.device,
++                        image_resize_policy: str = "native") -> tuple[torch.Tensor, torch.Tensor]:
+         merge_area = int(self.processor.image_processor.merge_size)**2
+         pixel_values = None
+         image_grid_thw = None
+@@ -228,7 +235,10 @@
+         if any(image is None for image in images):
+             raise ValueError("MiniMax-H3 reference images must be prepared before conditioning.")
+         if images:
+-            vision = self.processor.image_processor(images=images, return_tensors="pt")
++            # Cap/original images are already 32-aligned. Avoid min_pixels
++            # enlarging them again; video processing retains its native policy.
++            image_options = {} if image_resize_policy == "native" else {"do_resize": False}
++            vision = self.processor.image_processor(images=images, return_tensors="pt", **image_options)
+             pixel_values = vision["pixel_values"]
+             image_grid_thw = vision["image_grid_thw"]
+             image_token_counts = [int(grid.prod().item()) // merge_area for grid in image_grid_thw]
+@@ -288,7 +298,8 @@
+             # range so Nsight Systems exposes their complete conditioning cost.
+             with nvtx_range("minimax_h3.text_encoding"):
+                 if self.ref2va:
+-                    prompt_embeds, text_token_tags = self._encode_ref2va(batch, device)
++                    prompt_embeds, text_token_tags = self._encode_ref2va(
++                        batch, device, fastvideo_args.pipeline_config.h3_reference_image_resize_policy)
+                 else:
+                     prompt_embeds, text_token_tags = self._encode_fl2va(batch, device)
+         finally:

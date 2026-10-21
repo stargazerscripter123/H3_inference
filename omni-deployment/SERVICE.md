@@ -99,6 +99,36 @@ enabled cannot identify either setting's individual effect. Explicitly set both
 to `0` for subsequent baseline runs if they were exported in the shell. This
 package does not enable either option on the target host by itself.
 
+## Reference image size policy
+
+The versioned patch in `patches/reference-image-cap-v1.patch` adds explicit
+image geometry to the pinned upstream source. Apply it only with a stopped
+service, after distributing the package through Git:
+
+```bash
+"$OMNI_PYTHON" omni-deployment/scripts/omni_reference_patch.py apply \
+  --source "$OMNI_FASTVIDEO_SRC" --project-root "$H3_OMNI_ROOT"
+```
+
+The helper checks the exact upstream commit, patch hash and all four source
+hashes; modified or partially patched trees fail closed. The controller and
+service verify this identity at startup and include it in the fingerprint.
+
+`OMNI_REFERENCE_IMAGE_RESIZE_POLICY` accepts `native`, `cap` or `original`.
+The controller's unset default remains native for compatibility. The target
+env file selects cap480 for business deployment. With `cap`, set
+`OMNI_REFERENCE_IMAGE_MAX_SHORT_EDGE` to an integer at least 32 (480 or 720 for
+this evaluation). With native/original, leave it unset or set it to 0.
+
+Cap modes never upscale small sources. The short edge aligns down to a multiple
+of 32, then the long edge scales proportionally and aligns down; cap720 therefore
+allows at most 704. Original uses the source dimensions subject only to that
+alignment, without the upstream short-edge 2048 resize. Native retains the exact
+upstream behavior. Cap and original explicitly disable the Qwen image processor's
+second resize; video processing is unchanged. Numeric geometry logs allow the
+report to compare requested policy and observed preprocessing. This does not
+change output resolution or provide independent hard first-frame conditioning.
+
 ## Lifecycle
 
 The controller owns one service at a time, guarded by `run/omni/control.lock`.
