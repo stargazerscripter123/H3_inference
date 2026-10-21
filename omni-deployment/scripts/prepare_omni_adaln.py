@@ -323,11 +323,20 @@ def main() -> int:
                       "num_frames": item["num_frames"], "configured_transformer_forwards": 8,
                       "measured_transformer_forwards": None, "output": str(output_path)}
             request_start = time.perf_counter()
+            print("OMNI_REQUEST_START " + json.dumps({"id": item["id"], "index": index}), flush=True)
             try:
                 result = generator.generate(request)
                 record["generation_wall_seconds"] = time.perf_counter() - request_start
                 record["reported_generation_seconds"] = result.generation_time
+                record["reported_e2e_seconds_including_save"] = result.extra.get("e2e_latency")
                 record["reported_rank0_peak_allocated_mb"] = result.peak_memory_mb
+                record["reported_peak_scope"] = "executor value after stage resets; not whole-request peak"
+                stages = getattr(result.logging_info, "stages", {})
+                record["rank0_stages"] = dict(stages)
+                stage_peaks = [stage["peak_allocated_mb"] for stage in stages.values()
+                               if isinstance(stage.get("peak_allocated_mb"), (int, float))]
+                record["rank0_max_stage_peak_allocated_mb"] = max(stage_peaks) if stage_peaks else None
+                record["stage_peak_scope"] = "stage windows; first request may include model initialization"
                 record["per_rank_peak_allocated_mb"] = None
                 actual_output = Path(result.video_path) if result.video_path else output_path
                 if not actual_output.is_file():

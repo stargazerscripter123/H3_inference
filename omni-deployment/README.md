@@ -45,8 +45,10 @@ results are not measurements of this Omni executor, model or operating system.
 | `scripts/prepare_omni_adaln.py` | Prepare and atomically publish a complete table; validate in a fresh process |
 | `scripts/run_omni.py` | One HTTP video job, reference hashes, download, ffprobe validation and manifest |
 | `scripts/bench_omni.py` | Explicit sequential warmup/measured plan with separate scenario/cache summaries |
+| `scripts/monitor_omni_resources.py` | Read-only Linux GPU/host memory and scoped process RSS sampling; JSONL and peak summary |
 | `tests/test_omni_service_control.py` | CPU tests for ownership, venv path handling and Ray liveness adapter |
 | `tests/test_omni_adaln.py` | Regression tests for FP32 embedding keys, BF16 modulation and table integrity |
+| `tests/test_omni_resource_monitor.py` | CPU parser, process scope/PID reuse, and signal-summary checks |
 | `scripts/test_run_omni.py` | CPU tests for request contracts, mocked job lifecycle, validation and reporting |
 | `SERVICE.md` | Service configuration, lifecycle, environment and compatibility details |
 | `scripts/prepare_omni_adaln.md` | AdaLN request format, commands and publication/validation rules |
@@ -96,6 +98,11 @@ file hashes; a directory name is not revision verification. Do not silently
 substitute a different base model or download the full BF16 base.
 
 Set actual verified paths, replacing every `/absolute/path/...` placeholder:
+
+For the known `popos-5090` layout, `source /home/isaac/workdir/h3/omni-deployment/env.popos-5090.sh`
+selects the dedicated interpreter, source/model/table paths and local tools.
+It starts no processes and does not verify assets; complete the checks below
+before using the selected paths. Other layouts can set the variables explicitly.
 
 ```bash
 export H3_OMNI_ROOT=/home/isaac/workdir/h3
@@ -290,6 +297,57 @@ denominator; unrun requests are reported separately. Percentiles explicitly
 cover successful requests only. A client timeout does not cancel server work.
 Inspect the retained job ID and manifest before any manual retry.
 
+### External resource monitoring during smoke tests and benchmarks
+
+Run the standard-library monitor in another terminal on the target host before
+the smoke/benchmark request. Keep separate output files for SP1/SP2 and each run:
+
+```bash
+"$OMNI_PYTHON" "$H3_OMNI_ROOT/omni-deployment/scripts/monitor_omni_resources.py" \
+  --project-root "$H3_OMNI_ROOT" --interval 1 --duration 1800 \
+  --output "$H3_OMNI_ROOT/outputs/resources/sp1-screen-001.jsonl"
+```
+
+Omit `--duration` to sample until Ctrl-C or a SIGTERM sent specifically to this
+monitor. Its signal handlers only stop its own loop; the monitor never signals
+the observed processes or changes GPU/service settings. A running `nvidia-smi`
+query has a five-second timeout, so finalization may wait for that query. Both
+normal duration expiry and handled SIGINT/SIGTERM write a final JSONL summary
+and sibling `sp1-screen-001.summary.json`. SIGKILL, power loss, or a full filesystem
+cannot guarantee that final summary. Existing evidence files are not overwritten.
+
+Each sample records UTC time and monotonic elapsed time, physical GPUs 0 and 1
+with UUID/index, GPU/memory utilization percentages, device memory used/total
+in MiB, Linux `MemAvailable`/`SwapFree` and totals in bytes, and selected process
+RSS in bytes. **GPU memory is whole-device `nvidia-smi` usage, including display
+and unrelated processes; it is not PyTorch allocated/reserved memory.** Summaries
+report sampled per-device peaks, minimum host available/free memory, maximum
+total-minus-available memory/swap usage, and per-process/aggregate selected RSS
+peaks. Summed RSS can count shared pages more than once and is not total physical
+memory consumption. Sampling can miss brief peaks; collection duration is recorded
+to show overhead or an interval the machine could not maintain.
+
+Process RSS is limited to the same user and executable/script paths under this
+project's `envs/omni` or `omni-deployment`. The script inspects only executable
+and script-path tokens, stopping before application arguments or Python `-c`
+code. It never reads `/proc/*/environ`, credentials, or saves full command lines.
+RayWorkerWrapper actors require an identified project ancestor, or an explicitly
+verified `--ray-actor-pid PID` (repeatable). Explicit actor PIDs must already exist;
+their `/proc` start time is bound on startup and checked against reuse. An unrelated
+Ray actor with the same process title is excluded. Actors without a surviving
+identifiable ancestor require the explicit PID option, so review process coverage
+instead of assuming every worker was discovered. Run the monitor with the same
+user as the service; it does not escalate access.
+
+Query failures and missing RSS are recorded as unavailable/partial evidence,
+not zero usage. Per-process exit races and discovery gaps remain in the JSONL;
+the summary exposes skipped/raced counts and samples with no selected processes.
+The exit code is 0 for samples without source errors, 2 when samples are absent
+or source errors occurred, and 1 for setup/output failures. A partial RSS sum is
+only the sum of successfully read selected processes. Keep these files beside
+the client reports and service logs; the monitor does not link resource samples
+to individual request IDs or judge generation quality.
+
 ### 6. Acceptance and normal shutdown
 
 Accept the deployment only after the actual environment/assets are recorded,
@@ -315,6 +373,7 @@ From the package directory:
 ```bash
 python3 -m unittest discover -s tests -p 'test_omni_service_control.py' -v
 python3 -m unittest discover -s scripts -p 'test_run_omni.py' -v
+python3 -m unittest discover -s tests -p 'test_omni_resource_monitor.py' -v
 python3 -m py_compile scripts/omni_control.py scripts/omni_service.py scripts/omni_ray_health.py scripts/prepare_omni_adaln.py scripts/run_omni.py scripts/bench_omni.py
 ```
 

@@ -59,6 +59,17 @@ source checkout HEAD must match the pin.
 Inherited `FASTVIDEO_*`, `NCCL_*`, and `RAY_*` overrides are removed before
 applying this recipe so another experiment cannot silently change its backend.
 
+All ranks emit stage logs (`FASTVIDEO_LOG_ALL_PROCESSES=1`); retain private Ray
+actor logs to map each worker UUID to its GPU. `OMNI_SP_PROFILE=1` enables a
+separate diagnostic run: count rank-0 `H3_STAGE_MS` lines within each denoising
+stage to measure completed transformer forwards. It adds CUDA events and
+synchronization, so the default is `0` and formal timing runs keep it disabled.
+Changing the flag changes the service fingerprint and requires stop/start.
+Stage timings are seconds in structured results and milliseconds in text logs.
+The executor's final `peak_memory_mb` is not the whole-request peak because
+stage logging resets allocator peaks; use the maximum stage peak per rank and
+external GPU/host samples. Report the latter as device-level sampled memory.
+
 ## Lifecycle
 
 The controller owns one service at a time, guarded by `run/omni/control.lock`.

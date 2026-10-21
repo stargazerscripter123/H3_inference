@@ -1,9 +1,9 @@
 # FastH3 Omni：32 次正式测量的筛选计划
 
-本目录只生成计划和待执行素材命令。未连接远端、未运行模型、未打开图片或视频。
+本目录保存测量计划及素材生成命令。2026-10-21 主任务已在 popos-5090 生成素材并核验哈希/媒体元数据；尚未运行本计划的模型测量，也未打开图片或视频。
 `generate_plans.py` 通过当前 `omni-deployment/scripts/run_omni.py` 的
 `build_request(..., server_paths=True)` 校验每行，同时核对 `bench_omni.py`
-接受的缓存标签。计划中的远端素材尚未创建、探测或验证 SHA-256。
+接受的缓存标签。远端验证清单为 `run/omni/bench32-assets-verified.json`，覆盖 21 个衍生文件及完整官方影片 SHA-256。
 
 ## 测量矩阵与顺序
 
@@ -52,7 +52,7 @@ S2 使用 `<Picture 1>` + `<Picture 2>` 均正确。
 
 ## 素材衍生清单
 
-`derivatives.json` 列出 **21 个**待生成文件，以及每个文件的完整影片时间戳、类型、
+`derivatives.json` 列出 **21 个**衍生文件，以及每个文件的完整影片时间戳、类型、
 目标路径、预期 ffprobe 元数据。统一放在：
 
 `/home/isaac/workdir/h3/inputs/tos/bench32-v1/`
@@ -82,7 +82,7 @@ bash /home/isaac/workdir/h3/omni-deployment/benchmarks/derive_refs.sh \
   /absolute/path/to/authorized-full-tears-of-steel.mov
 ```
 
-也可传上面的官方 URL。脚本只含生成命令，本轮未执行。
+也可传上面的官方 URL。脚本生成命令已由主任务在远端执行并验证。
 默认使用部署目录 `.tools/media/bin/ffmpeg` 和 `ffprobe`，可用
 `OMNI_FFMPEG`、`OMNI_FFPROBE` 指定其他已核实的工具。
 `-n` 拒绝覆盖已有文件；中途失败后应核对已生成文件再按清单续做，不直接覆盖。

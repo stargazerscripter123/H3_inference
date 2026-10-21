@@ -111,13 +111,24 @@ settings. GPU and host-memory monitoring remains external to this wrapper.
   the downloader's manifest; a local folder name is not proof of a revision.
 - `requests.jsonl`: append-only passed/failed request records, seed, phase,
   full `generate()` wall time including writing the local MP4, official
-  generation time, official rank-0 peak allocation, and ffprobe results.
+  generation time (which excludes MP4 save), upstream E2E including save,
+  rank-0 stage timings/allocator peaks, and ffprobe results. The executor's
+  final peak value follows stage resets and is not a whole-request peak;
+  `rank0_max_stage_peak_allocated_mb` takes the maximum available stage window.
+  The first request's first window may include initialization. Other ranks and
+  device-level/host-memory samples require the external monitor.
 - One MP4 per request. Checks require the requested dimensions/frame count,
   24 fps, 32-kHz stereo audio, and audio/video durations within 0.20 seconds.
   ffprobe decoding/validation time is recorded separately from generation.
 - `configured_transformer_forwards=8` comes from the validated PDD contract.
   `measured_transformer_forwards` and per-rank peak allocation are `null`:
   this wrapper does not invent measurements absent from the public result.
+
+For a separate diagnostic run, set `FASTVIDEO_H3_SP_PROFILE=1` before launch
+and count rank-0 `H3_STAGE_MS` records between each denoising stage's start/end.
+`OMNI_REQUEST_START` labels the request boundary. This counts completed DiT
+forwards; do not add counts from different SP ranks. Profiling introduces CUDA
+events and synchronization, so disable it for performance comparisons.
 
 Do not combine warmup, preparation or failed requests into a successful warm
 latency average. New prompt plus fixed references only reuses the independent

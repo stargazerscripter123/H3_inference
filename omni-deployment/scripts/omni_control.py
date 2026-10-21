@@ -41,6 +41,7 @@ RECIPE_ENV = {
     "FASTVIDEO_H3_VAE_TILE_PARALLEL": "1",
     "FASTVIDEO_H3_VAE_TILE_BATCH": "4",
     "FASTVIDEO_STAGE_LOGGING": "1",
+    "FASTVIDEO_LOG_ALL_PROCESSES": "1",
     "RAY_USAGE_STATS_ENABLED": "0",
     "FASTVIDEO_HOST_IP": "127.0.0.1",
     "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
@@ -96,6 +97,7 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
     config["server"]["port"] = port
     env = dict(RECIPE_ENV)
     env.update({"FASTVIDEO_H3_ADALN_TABLE": values["OMNI_ADALN_TABLE"],
+                "FASTVIDEO_H3_SP_PROFILE": os.environ.get("OMNI_SP_PROFILE", "0"),
                 "FASTVIDEO_H3_VAE_NVFP4_DECODER": values["OMNI_DECODER"],
                 "FASTVIDEO_H3_REF2VA_MEMO_ENTRIES": os.environ.get("OMNI_MEMO_ENTRIES", "16"),
                 "OMNI_RAY_CPUS": os.environ.get("OMNI_RAY_CPUS", "8"),
@@ -103,6 +105,8 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
                 "CUDA_VISIBLE_DEVICES": os.environ.get("OMNI_GPU_IDS", "1" if profile == "sp1" else "0,1")})
     if env["CUDA_VISIBLE_DEVICES"] not in ({"0", "1"} if profile == "sp1" else {"0,1", "1,0"}):
         raise ValueError("SP1 requires GPU 0 or 1; SP2 requires both 0 and 1")
+    if env["FASTVIDEO_H3_SP_PROFILE"] not in {"0", "1"}:
+        raise ValueError("OMNI_SP_PROFILE must be 0 or 1")
     for key in ("FASTVIDEO_H3_REF2VA_MEMO_ENTRIES", "OMNI_RAY_CPUS", "OMNI_RAY_OBJECT_STORE_BYTES"):
         value = int(env[key])
         if value < (0 if key.endswith("ENTRIES") else 1):
