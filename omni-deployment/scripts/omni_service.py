@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Launch the pinned FastVideo server with a private, bounded Ray runtime."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+
+FASTVIDEO_COMMIT = "cdda1b7535fe32699335e39db82c1d4db21ceb88"
+
+
+def main() -> None:
+    # Uvicorn replaces this while serving. During imports/model/Ray startup,
+    # convert TERM into Python unwinding so the private Ray finally still runs.
+    def stop_requested(_signum, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_requested)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--owner-token", required=True)
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--validate-only", action="store_true")
+    args = parser.parse_args()
+    source = Path(args.source).resolve()
+    actual = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if actual != FASTVIDEO_COMMIT:
+        raise RuntimeError(f"FastVideo commit mismatch: {actual}")
+    # The checkout is explicit; a different editable install must not win.
+    sys.path.insert(0, str(source))
+    from fastvideo.entrypoints.cli.inference_config import build_serve_config
+    from fastvideo.api.compat import generator_config_to_fastvideo_args
+    typed = build_serve_config(argparse.Namespace(config=args.config))
+    generator_config_to_fastvideo_args(typed.generator)
+    if args.validate_only:
+        print("Pinned ServeConfig and GeneratorConfig conversion: PASS", flush=True)
+        return
+
+    import fastvideo
+    if not Path(fastvideo.__file__).resolve().is_relative_to(source):
+        raise RuntimeError("FastVideo imported from a different source checkout")
+    private_ray = None
+    try:
+        if typed.generator.engine.execution_backend == "ray":
+            import ray
+            if ray.is_initialized():
+                raise RuntimeError("Refusing to reuse an unexpected Ray runtime")
+            # Force a new local instance; never attach to RAY_ADDRESS or ray://.
+            os.environ.pop("RAY_ADDRESS", None)
+            private_ray = ray
+            ray.init(
+                address="local",
+                num_cpus=int(os.environ.get("OMNI_RAY_CPUS", "8")),
+                num_gpus=typed.generator.engine.num_gpus,
+                object_store_memory=int(os.environ.get("OMNI_RAY_OBJECT_STORE_BYTES", "4294967296")),
+                include_dashboard=False,
+                namespace=f"h3-omni-{args.owner_token}",
+                _temp_dir=f"/tmp/h3-omni-{os.getuid()}-{args.owner_token[:8]}",
+                _node_ip_address="127.0.0.1",
+            )
+            from omni_ray_health import install_ray_health_adapter
+            install_ray_health_adapter()
+            resources = ray.cluster_resources()
+            if int(resources.get("GPU", 0)) != typed.generator.engine.num_gpus:
+                raise RuntimeError(f"Unexpected private Ray GPU resources: {resources}")
+            print(json.dumps({"private_ray": True, "resources": resources}), flush=True)
+
+        from fastvideo.entrypoints.cli.serve import ServeSubcommand
+        ServeSubcommand().cmd(argparse.Namespace(config=args.config))
+    finally:
+        if private_ray is not None:
+            # This only shuts down the Ray instance created by this process.
+            private_ray.shutdown()
+
+
+if __name__ == "__main__":
+    main()
