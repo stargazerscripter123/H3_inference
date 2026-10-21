@@ -48,6 +48,7 @@ results are not measurements of this Omni executor, model or operating system.
 | `scripts/prepare_omni_adaln.py` | Prepare and atomically publish a complete table; validate in a fresh process |
 | `scripts/run_omni.py` | One HTTP video job, reference hashes, download, ffprobe validation and manifest |
 | `scripts/bench_omni.py` | Explicit sequential warmup/measured plan with separate scenario/cache summaries |
+| `scripts/run_business_eval.py` | Validate a private nine-job business protocol and run each job in a fresh owned SP2 service; record failures without automatic generation retries |
 | `scripts/monitor_omni_resources.py` | Read-only Linux GPU/host memory and scoped process RSS sampling; JSONL and peak summary |
 | `tests/test_omni_service_control.py` | CPU tests for ownership, venv path handling and Ray liveness adapter |
 | `tests/test_omni_adaln.py` | Regression tests for FP32 embedding keys, BF16 modulation and table integrity |

@@ -9,3 +9,22 @@ Use SP2 on GPUs 0,1, released eight-forward PDD/CFG1, the 36-layer decoder, VAE 
 Private request payloads, prompts, media, identifiers and plans belong in ignored runtime directories, never in this public repository. Record source provenance and media SHA256 locally. Report any source API capability that cannot be represented by the local Ref2VA pipeline (including independent hard first-frame conditioning) explicitly; mapping that image as a reference is not an equivalent guarantee.
 
 Runtime plans, service fingerprints, source patch hashes, processed geometry observations, validation manifests and resource samples must agree before a timing enters the business report. Failed, interrupted and unrun requests remain distinct. Videos and human-only quality frames go to a new output directory; agents do not open media.
+
+After placing the sealed private inputs and protocol under the deployment root,
+invoke the committed runner with new record and output paths:
+
+```bash
+cd /home/isaac/workdir/h3
+source omni-deployment/env.popos-5090.sh
+"$OMNI_PYTHON" omni-deployment/scripts/run_business_eval.py \
+  --protocol "$H3_OMNI_ROOT/run/omni/<run-id>/protocol.json" \
+  --record "$H3_OMNI_ROOT/run/omni/<run-id>.json" \
+  --output-root "$H3_OMNI_ROOT/outputs/omni-<run-id>" \
+  --project-root "$H3_OMNI_ROOT"
+```
+
+The runner requires the service to be stopped before each job. It verifies plan,
+prompt and reference identities, owns only the processes it starts, and stops
+subsequent jobs if graceful cleanup cannot be confirmed. It never resumes or
+overwrites an existing run. A failed generation stays recorded as a failure;
+there is no automatic regeneration to improve a sample count.
