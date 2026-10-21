@@ -44,6 +44,15 @@ shard: use immutable model directories and the asset preparation manifest.
 Optional overrides: `OMNI_FASTVIDEO_SRC`, `OMNI_PYTHON`, `OMNI_INPUT_DIR`,
 `OMNI_OUTPUT_DIR`, `OMNI_PORT` (8108), `OMNI_GPU_IDS`, `OMNI_MEMO_ENTRIES` (16),
 `OMNI_RAY_CPUS` (8), `OMNI_RAY_OBJECT_STORE_BYTES` (4294967296 = 4 GiB).
+`OMNI_CUDA_HOME` and `OMNI_MEDIA_BIN` override the CUDA toolkit and media tool
+directories with absolute paths. By default the controller derives CUDA from
+the unresolved venv interpreter path at
+`<venv>/lib/python3.12/site-packages/nvidia/cu13`, sets `CUDA_HOME` and
+`CUDACXX=<CUDA_HOME>/bin/nvcc`, and prefixes child `PATH` with venv `bin`, CUDA
+`bin`, and `<root>/.tools/media/bin` before the inherited `PATH`. This applies to
+both validation and startup, so a fresh shell can start a service that finds
+NVCC for JIT compilation and the project's ffmpeg/ffprobe. It preserves uv's
+venv path instead of resolving its Python symlink to the managed interpreter.
 The service binds only `127.0.0.1`; only files within `OMNI_INPUT_DIR` may be
 submitted as local references (default `/home/isaac/workdir/h3/inputs`). The
 source checkout HEAD must match the pin.
@@ -99,9 +108,11 @@ check; a completed smoke request remains necessary to test GPU execution.
 
 - Both final templates parsed through the pinned upstream `ServeConfig` parser.
 - Python compilation passed.
-- Eight CPU-only tests passed: Ray handles without `proc`, failed/restarting or
+- Twelve CPU-only tests passed: Ray handles without `proc`, failed/restarting or
   missing actors, GCS failure, shutdown/error state, MP fallback, PID reuse and
-  owner/group/token mismatch refusal, and venv executable symlink preservation.
+  owner/group/token mismatch refusal, venv executable symlink preservation,
+  CUDA/media defaults and overrides, relative-path refusal, and project-tool
+  precedence over unrelated executables in the inherited PATH.
 - GPU load, Ray startup/shutdown, API smoke and performance require target-host
   verification. `validate` additionally invokes pinned upstream config-to-engine
   conversion with the real target environment before any service startup.

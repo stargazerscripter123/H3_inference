@@ -54,6 +54,19 @@ def absolute(value: str, name: str, *, follow_symlinks: bool = False) -> Path:
     return path.resolve() if follow_symlinks else path
 
 
+def toolchain_environment(root: Path, python: Path) -> dict[str, str]:
+    # Preserve the venv's executable path: uv's python symlink points outside
+    # the venv, whereas the CUDA wheel is installed inside its site-packages.
+    venv_bin = python.parent
+    cuda_home = absolute(os.environ.get("OMNI_CUDA_HOME", str(
+        venv_bin.parent / "lib/python3.12/site-packages/nvidia/cu13")), "OMNI_CUDA_HOME")
+    media_bin = absolute(os.environ.get("OMNI_MEDIA_BIN", str(root / ".tools/media/bin")), "OMNI_MEDIA_BIN")
+    prefix = [str(venv_bin), str(cuda_home / "bin"), str(media_bin)]
+    inherited_path = os.environ.get("PATH") or os.defpath
+    return {"CUDA_HOME": str(cuda_home), "CUDACXX": str(cuda_home / "bin/nvcc"),
+            "PATH": os.pathsep.join([*prefix, inherited_path])}
+
+
 def settings(profile: str) -> tuple[dict, dict, dict]:
     root = absolute(os.environ.get("H3_OMNI_ROOT", "/home/isaac/workdir/h3"), "H3_OMNI_ROOT")
     values = {}
@@ -97,6 +110,7 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
     paths = {"root": str(root), "run": str(root / "run/omni"),
              "python": str(absolute(os.environ.get("OMNI_PYTHON", str(root / "envs/omni/bin/python")), "OMNI_PYTHON", follow_symlinks=False)),
              "source": str(absolute(os.environ.get("OMNI_FASTVIDEO_SRC", str(root / "src/FastVideo")), "OMNI_FASTVIDEO_SRC"))}
+    env.update(toolchain_environment(root, Path(paths["python"])))
     return config, env, paths
 
 

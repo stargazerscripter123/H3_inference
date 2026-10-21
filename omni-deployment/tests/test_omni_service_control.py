@@ -1,5 +1,7 @@
 """CPU-only safety/compatibility tests; no GPU, Ray, network or service startup."""
 from pathlib import Path
+import os
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace as NS
@@ -14,6 +16,67 @@ from omni_ray_health import install_ray_health_adapter
 
 def actor(identity):
     return NS(_actor_id=NS(hex=lambda: identity))
+
+
+class ToolchainSettingsTest(unittest.TestCase):
+    def asset_env(self, root):
+        return {"H3_OMNI_ROOT": str(root), "OMNI_MODEL_DIR": str(root / "models/qad"),
+                "OMNI_ADALN_TABLE": str(root / "tables/adaln.pt"),
+                "OMNI_DECODER": str(root / "models/decoder.safetensors"),
+                "PATH": "/usr/bin:/bin", "CUDA_HOME": "/old/cuda", "CUDACXX": "/old/cuda/bin/nvcc"}
+
+    def test_default_toolchain_overrides_stale_shell_cuda(self):
+        root = Path("/home/isaac/workdir/h3")
+        with patch.dict(os.environ, self.asset_env(root), clear=True):
+            _, env, paths = control.settings("sp2")
+        cuda = root / "envs/omni/lib/python3.12/site-packages/nvidia/cu13"
+        self.assertEqual(env["CUDA_HOME"], str(cuda))
+        self.assertEqual(env["CUDACXX"], str(cuda / "bin/nvcc"))
+        self.assertEqual(env["PATH"].split(os.pathsep)[:3], [str(root / "envs/omni/bin"),
+                         str(cuda / "bin"), str(root / ".tools/media/bin")])
+        self.assertEqual(paths["python"], str(root / "envs/omni/bin/python"))
+
+    def test_venv_symlink_stays_in_venv_and_project_tools_win(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            venv_bin = root / "custom-env/bin"
+            cuda_bin = root / "custom-env/lib/python3.12/site-packages/nvidia/cu13/bin"
+            media_bin, fallback = root / ".tools/media/bin", root / "unrelated/bin"
+            for folder in (venv_bin, cuda_bin, media_bin, fallback):
+                folder.mkdir(parents=True)
+            python = venv_bin / "python"
+            python.symlink_to(sys.executable)
+            for folder, names in ((cuda_bin, ("nvcc",)), (media_bin, ("ffmpeg", "ffprobe")),
+                                  (fallback, ("python", "nvcc", "ffmpeg", "ffprobe"))):
+                for name in names:
+                    path = folder / name
+                    path.write_text("#!/bin/sh\nexit 0\n")
+                    path.chmod(0o755)
+            shell_env = {**self.asset_env(root), "OMNI_PYTHON": str(python), "PATH": str(fallback)}
+            with patch.dict(os.environ, shell_env, clear=True):
+                _, env, paths = control.settings("sp1")
+            self.assertEqual(paths["python"], str(python))
+            self.assertEqual(env["CUDA_HOME"], str(cuda_bin.parent))
+            for name, folder in (("python", venv_bin), ("nvcc", cuda_bin),
+                                 ("ffmpeg", media_bin), ("ffprobe", media_bin)):
+                self.assertEqual(shutil.which(name, path=env["PATH"]), str(folder / name))
+
+    def test_explicit_absolute_toolchain_overrides(self):
+        root = Path("/deploy/h3")
+        with patch.dict(os.environ, {**self.asset_env(root), "OMNI_CUDA_HOME": "/tools/cuda",
+                                    "OMNI_MEDIA_BIN": "/tools/media"}, clear=True):
+            _, env, _ = control.settings("sp1")
+        self.assertEqual(env["CUDA_HOME"], "/tools/cuda")
+        self.assertEqual(env["CUDACXX"], "/tools/cuda/bin/nvcc")
+        self.assertEqual(env["PATH"].split(os.pathsep)[:3], ["/deploy/h3/envs/omni/bin",
+                         "/tools/cuda/bin", "/tools/media"])
+
+    def test_relative_toolchain_override_is_rejected(self):
+        for key in ("OMNI_CUDA_HOME", "OMNI_MEDIA_BIN"):
+            with self.subTest(key=key), patch.dict(os.environ, {**self.asset_env(Path("/deploy/h3")),
+                                                               key: "relative/toolchain"}, clear=True):
+                with self.assertRaisesRegex(ValueError, key + " must be an absolute path"):
+                    control.settings("sp1")
 
 
 class RayHealthTest(unittest.TestCase):

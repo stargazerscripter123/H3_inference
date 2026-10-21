@@ -6,8 +6,8 @@ image/video/audio generation requests and sequential benchmarks. SP2 means
 sequence parallelism with replicated NVFP4 weights and parallel VAE; TP stays 1.
 Two 32-GB cards do not become one 64-GB memory pool.
 
-**Status on 2026-10-21:** the package has passed local CPU checks. Target-host
-dependency installation and model download are in progress. GPU generation,
+**Status on 2026-10-21:** the package has passed local CPU checks. The target
+environment now uses managed Python 3.12.15 and Torch 2.12/cu130. GPU generation,
 Ray integration, table preparation, memory peaks and latency have **not** been
 validated. This is not a completed deployment or a claim of a 15-second result.
 The resolved dependency lock and verified asset manifest are still pending.
@@ -19,7 +19,7 @@ The resolved dependency lock and verified asset manifest are still pending.
 | FastVideo | `cdda1b7535fe32699335e39db82c1d4db21ceb88` | Local source inspected; launcher checks target checkout HEAD |
 | Native FastH3 Omni NVFP4 QAD | `f01e6a23ac6066aa9eb622cf94b6259442e70ec2` | Intended download revision; actual files require the downloader manifest |
 | Sampling contract | Ref2VA, released 8-forward PDD, CFG 1, 24 fps | Client/schema CPU checks passed; no legacy `NFE+1` conversion |
-| Python | Project-managed 3.12.15, including development headers | Installed on target; final venv integration pending |
+| Python | Project-managed 3.12.15, including development headers | Installed in the dedicated target venv |
 | Torch / CUDA wheels | Pinned source requires Torch 2.12.0; target installation uses cu130 | Full resolved environment and kernel execution pending |
 | FastVideo kernel | Build from the fixed FastVideo source; PyPI 0.3.5 predates the required sparse FP4 API | Target build and numerical execution pending |
 | CUDA build tools | NVCC 13.0.88 and CCCL 13.0.85 | Intended pins; complete toolkit layout and CMake detection pending |
@@ -65,8 +65,19 @@ successful installation commands and resolved package versions. Do not treat
 package import success as proof that a CUDA kernel can run.
 
 Use the project-managed Python, since the rebuilt host's system Python lacks
-development headers. The first environment was created with system Python;
-its downloaded package cache can be reused when building the final venv.
+development headers. The final environment is `envs/omni` and retains its venv
+interpreter path even though that executable links to the managed Python.
+
+For both `validate` and `start`, the controller automatically sets `CUDA_HOME`
+to `<venv>/lib/python3.12/site-packages/nvidia/cu13` and `CUDACXX` to its
+`bin/nvcc` (the target has NVCC 13.0.88). Its child `PATH` begins with the venv's
+`bin`, CUDA's `bin`, then `<deployment-root>/.tools/media/bin`, followed by the
+caller's `PATH`. The media directory contains the project's `ffmpeg` and `ffprobe`.
+Starting the service from a new shell therefore needs no manual CUDA or media
+exports. `OMNI_CUDA_HOME` and `OMNI_MEDIA_BIN` accept absolute path overrides.
+The default layout is for the deployment's Python 3.12 environment; use
+`OMNI_CUDA_HOME` when placing CUDA elsewhere. These settings are part of the
+service fingerprint, so changing them requires an explicit stop/start.
 
 Verify source HEAD, Torch/CUDA versions, both GPU identities, available host/GPU
 memory, `ffmpeg`/`ffprobe`, and imports of the actual NVFP4/VSA extensions. Capture
@@ -96,7 +107,7 @@ export OMNI_OUTPUT_DIR="$H3_OMNI_ROOT/outputs/omni"
 cd "$H3_OMNI_ROOT/omni-deployment"
 git -C "$OMNI_FASTVIDEO_SRC" rev-parse HEAD
 "$OMNI_PYTHON" --version
-ffprobe -version
+"$H3_OMNI_ROOT/.tools/media/bin/ffprobe" -version
 ```
 
 After a verified asset manifest exists, set `OMNI_ASSET_MANIFEST` to its absolute
@@ -104,6 +115,15 @@ path. The controller fingerprints it, the contract, table and decoder. It checks
 component presence but does not independently hash every model shard.
 
 ### 2. Prepare the matching AdaLN table on SP1
+
+The direct preparation and client programs run outside the controller. For
+those commands only, give the current shell the same tools:
+
+```bash
+export CUDA_HOME="${OMNI_CUDA_HOME:-$H3_OMNI_ROOT/envs/omni/lib/python3.12/site-packages/nvidia/cu13}"
+export CUDACXX="$CUDA_HOME/bin/nvcc"
+export PATH="$H3_OMNI_ROOT/envs/omni/bin:$CUDA_HOME/bin:${OMNI_MEDIA_BIN:-$H3_OMNI_ROOT/.tools/media/bin}:$PATH"
+```
 
 Follow `scripts/prepare_omni_adaln.md` to write a preparation request file using
 approved reference media. Cover both a visual reference without explicit audio
@@ -296,7 +316,7 @@ python3 -m unittest discover -s scripts -p 'test_run_omni.py' -v
 python3 -m py_compile scripts/omni_control.py scripts/omni_service.py scripts/omni_ray_health.py scripts/prepare_omni_adaln.py scripts/run_omni.py scripts/bench_omni.py
 ```
 
-Observed locally: 8 lifecycle/health tests and 14 client/benchmark tests passed;
+Observed locally: 12 lifecycle/health/toolchain tests and 14 client/benchmark tests passed;
 Python compilation passed; both final JSON templates parsed with the pinned
 upstream `ServeConfig` parser. The client tests mock HTTP/media operations and
 do not execute GPUs. Target `omni_control.py validate` additionally checks the
