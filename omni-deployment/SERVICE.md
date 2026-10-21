@@ -106,6 +106,9 @@ The controller owns one service at a time, guarded by `run/omni/control.lock`.
 `/health`. READY indicates engine readiness, not warmup or output quality.
 The same running configuration is reused; switching SP1/SP2 or assets requires
 an explicit stop. A different listener or process identity is never adopted.
+The startup port probe uses `SO_REUSEADDR`, matching Linux server restart
+behavior: prior connections in TIME_WAIT do not block a new service, while a
+live listener still causes startup refusal. It does not enable `SO_REUSEPORT`.
 
 ```bash
 python3 omni-deployment/scripts/omni_control.py stop

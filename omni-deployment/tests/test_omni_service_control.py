@@ -1,7 +1,8 @@
-"""CPU-only safety/compatibility tests; no GPU, Ray, network or service startup."""
+"""CPU-only tests; local loopback sockets only, no GPU, Ray or service startup."""
 from pathlib import Path
 from contextlib import redirect_stdout
 import io
+import errno
 import json
 import os
 import shutil
@@ -312,6 +313,40 @@ class StopOwnerTokenTest(unittest.TestCase):
                     self.assertEqual(json.loads(output.getvalue())["status"], "STOPPED")
                     self.assertFalse((run / "service.json").exists())
                     self.assertTrue((run / "stopped-original-token.json").is_file())
+
+
+class PortProbeTest(unittest.TestCase):
+    def test_active_listener_is_rejected_even_with_reuseaddr(self):
+        with control.socket.socket() as listener:
+            listener.setsockopt(control.socket.SOL_SOCKET, control.socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            with self.assertRaises(OSError) as raised:
+                control.check_listener_port_available(listener.getsockname()[1])
+            self.assertEqual(raised.exception.errno, errno.EADDRINUSE)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux server-side TIME_WAIT bind semantics")
+    def test_closed_listener_with_server_time_wait_allows_restart(self):
+        with control.socket.socket() as listener:
+            listener.settimeout(2)
+            listener.setsockopt(control.socket.SOL_SOCKET, control.socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+            listener.listen(1)
+            with control.socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+                accepted, _ = listener.accept()
+                with accepted:
+                    accepted.settimeout(2)
+                    # The server initiates FIN, so its port enters TIME_WAIT.
+                    accepted.shutdown(control.socket.SHUT_WR)
+                    self.assertEqual(client.recv(1), b"")
+                    client.shutdown(control.socket.SHUT_WR)
+                    self.assertEqual(accepted.recv(1), b"")
+        with control.socket.socket() as bare_probe:
+            with self.assertRaises(OSError) as raised:
+                bare_probe.bind(("127.0.0.1", port))
+            self.assertEqual(raised.exception.errno, errno.EADDRINUSE)
+        control.check_listener_port_available(port)
 
 
 if __name__ == "__main__":

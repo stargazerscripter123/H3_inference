@@ -231,6 +231,14 @@ def validate(config_path: Path, paths: dict, env: dict) -> None:
                    check=True, env=child_environment(env), cwd=paths["source"])
 
 
+def check_listener_port_available(port: int) -> None:
+    # Match the server's POSIX bind behavior: a prior connection's TIME_WAIT
+    # does not block restart, but a live listener still owns the port.
+    with socket.socket() as test:
+        test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        test.bind(("127.0.0.1", port))
+
+
 def start(profile: str, run: Path) -> dict:
     config, env, paths = settings(profile)
     identity = {"config": config, "env": env, "paths": paths, "pin": PIN,
@@ -244,8 +252,7 @@ def start(profile: str, run: Path) -> dict:
         if previous["fingerprint"] != digest:
             raise RuntimeError("An owned service with a different configuration is active; stop it explicitly first")
         return {"reused": True, **previous, **probe(previous)}
-    with socket.socket() as test:
-        test.bind(("127.0.0.1", config["server"]["port"]))
+    check_listener_port_available(config["server"]["port"])
     for folder in (Path(config["server"]["output_dir"]), Path(config["server"]["media_roots"][0]), Path(paths["root"]) / "logs/omni"):
         folder.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
