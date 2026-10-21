@@ -59,6 +59,15 @@ source checkout HEAD must match the pin.
 Inherited `FASTVIDEO_*`, `NCCL_*`, and `RAY_*` overrides are removed before
 applying this recipe so another experiment cannot silently change its backend.
 
+`OMNI_NVFP4_MM_BACKEND` explicitly selects `auto` (default), `cutlass`, or
+`cudnn` for the pinned NVFP4 DiT matrix multiply path. `OMNI_STAGE_LOGGING`
+accepts exactly `0` or `1` and defaults to `1`. Both effective values enter the
+service fingerprint and require a fresh service when changed. Row splitting
+remains explicitly `FASTVIDEO_NVFP4_MM_ROW_SPLIT=off`; inherited backend,
+row-split and logging settings cannot override the controller recipe. These
+options expose experiments, not a measured speedup or guaranteed bitwise
+equivalence between kernels. Backend support still needs a real target smoke.
+
 All ranks emit stage logs (`FASTVIDEO_LOG_ALL_PROCESSES=1`); retain private Ray
 actor logs to map each worker UUID to its GPU. `OMNI_SP_PROFILE=1` enables a
 separate diagnostic run: count rank-0 `H3_STAGE_MS` lines within each denoising
@@ -66,6 +75,9 @@ stage to measure completed transformer forwards. It adds CUDA events and
 synchronization, so the default is `0` and formal timing runs keep it disabled.
 Changing the flag changes the service fingerprint and requires stop/start.
 Stage timings are seconds in structured results and milliseconds in text logs.
+With `OMNI_STAGE_LOGGING=0`, ordinary stage timings and their peak-reset behavior
+are disabled; external resource monitoring remains necessary. Compare timings
+only against a baseline using the same logging setting.
 The executor's final `peak_memory_mb` is not the whole-request peak because
 stage logging resets allocator peaks; use the maximum stage peak per rank and
 external GPU/host samples. Report the latter as device-level sampled memory.
@@ -128,6 +140,44 @@ upstream behavior. Cap and original explicitly disable the Qwen image processor'
 second resize; video processing is unchanged. Numeric geometry logs allow the
 report to compare requested policy and observed preprocessing. This does not
 change output resolution or provide independent hard first-frame conditioning.
+
+## Separate optimization experiments
+
+`scripts/run_optimization_eval.py` fully validates the sealed nine-job business
+protocol, then selects its three cap480 jobs. It retains the original prompt,
+ordered references, plan hashes and seeds, requiring exactly one first request
+and three warm requests with distinct seeds per case. Each case gets a fresh
+owned SP2 service. Generation failure is recorded without retry; continuation
+requires a confirmed clean stop. Lifecycle or ownership failure aborts the run.
+The original protocol and `run_business_eval.py` remain unchanged.
+
+Run one variant per new record and output directory. Supported variants are
+`baseline` (`auto`, VAE offload), `cutlass`, `cudnn`, `vae-resident` (`auto`, VAE
+offload disabled), and `decoder8` (`auto`, VAE offload, explicit `OMNI_DECODER8`
+asset). All keep expandable segments enabled, TP1/SP2, cap480 and 8 PDD
+forwards. Baseline/cutlass/cudnn/vae-resident use the explicit `OMNI_DECODER`
+asset. Independently verify decoder provenance and layer count before running;
+the runner records the full selected asset SHA, while a variant name does not
+prove an 8-layer checkpoint. The controller also fingerprints the actual asset.
+
+```bash
+source omni-deployment/env.popos-5090.sh
+"$OMNI_PYTHON" omni-deployment/scripts/run_optimization_eval.py \
+  --protocol "$H3_OMNI_ROOT/run/omni/zero-business-001/protocol.json" \
+  --variant cutlass --case case-01 \
+  --record "$H3_OMNI_ROOT/run/omni/optimization-cutlass-smoke-001.json" \
+  --output-root "$H3_OMNI_ROOT/outputs/omni-optimization-cutlass-smoke-001"
+```
+
+Omit `--case` for all three cases (12 requests). `--sp-profile 1` labels the
+whole attempt diagnostic and ineligible for formal timing. `--stage-logging`
+defaults to `1`; a `0` experiment requires its own matched baseline. Record paths
+must be inside `run/omni`, output roots inside `outputs`, and neither may exist.
+There is no automatic resume or overwrite. Results retain separate first/warm
+phases. The record adds `optimization` metadata; the original business collector's
+fixed baseline recipe is not a validator for these changed variants. Before
+reporting speedups, compare the actual launch identity with this metadata and
+review output quality independently.
 
 ## Lifecycle
 

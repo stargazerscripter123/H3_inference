@@ -42,6 +42,8 @@ RECIPE_ENV = {
     "FASTVIDEO_H3_VSA_HEADS_FIRST_TILE": "1",
     "FASTVIDEO_H3_VAE_TILE_PARALLEL": "1",
     "FASTVIDEO_H3_VAE_TILE_BATCH": "4",
+    "FASTVIDEO_NVFP4_MM_BACKEND": "auto",
+    "FASTVIDEO_NVFP4_MM_ROW_SPLIT": "off",
     "FASTVIDEO_STAGE_LOGGING": "1",
     "FASTVIDEO_LOG_ALL_PROCESSES": "1",
     "RAY_USAGE_STATS_ENABLED": "0",
@@ -121,6 +123,14 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
         raise ValueError("OMNI_PORT must be between 1024 and 65535")
     config["server"]["port"] = port
     env = dict(RECIPE_ENV)
+    backend = os.environ.get("OMNI_NVFP4_MM_BACKEND", "auto")
+    if backend not in {"auto", "cutlass", "cudnn"}:
+        raise ValueError("OMNI_NVFP4_MM_BACKEND must be auto, cutlass or cudnn")
+    stage_logging = os.environ.get("OMNI_STAGE_LOGGING", "1")
+    if stage_logging not in {"0", "1"}:
+        raise ValueError("OMNI_STAGE_LOGGING must be 0 or 1")
+    env["FASTVIDEO_NVFP4_MM_BACKEND"] = backend
+    env["FASTVIDEO_STAGE_LOGGING"] = stage_logging
     env["PYTORCH_ALLOC_CONF"] = ("expandable_segments:True" if flags["OMNI_EXPANDABLE_SEGMENTS"]
                                  else "backend:native")
     env.update({"FASTVIDEO_H3_ADALN_TABLE": values["OMNI_ADALN_TABLE"],

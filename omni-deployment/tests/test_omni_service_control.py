@@ -109,6 +109,77 @@ class ToolchainSettingsTest(unittest.TestCase):
             self.assertIs(config["generator"]["engine"]["offload"]["vae"], False)
             self.assertEqual(env["PYTORCH_ALLOC_CONF"], "backend:native")
 
+    def test_mm_and_stage_defaults_preserve_upstream_baseline(self):
+        for profile in ("sp1", "sp2"):
+            with self.subTest(profile=profile), patch.dict(os.environ, self.asset_env(Path("/deploy/h3")), clear=True):
+                _, env, _ = control.settings(profile)
+            self.assertEqual(env["FASTVIDEO_NVFP4_MM_BACKEND"], "auto")
+            self.assertEqual(env["FASTVIDEO_NVFP4_MM_ROW_SPLIT"], "off")
+            self.assertEqual(env["FASTVIDEO_STAGE_LOGGING"], "1")
+
+    def test_mm_and_stage_options_are_strict(self):
+        for name, values in (("OMNI_NVFP4_MM_BACKEND", ("", "AUTO", "triton", " cudnn", "cutlass ")),
+                             ("OMNI_STAGE_LOGGING", ("", "true", "false", "2", " 1", "0 "))):
+            for value in values:
+                with self.subTest(name=name, value=value), patch.dict(os.environ, {
+                        **self.asset_env(Path("/deploy/h3")), name: value}, clear=True):
+                    with self.assertRaisesRegex(ValueError, name):
+                        control.settings("sp2")
+
+    def test_validation_cannot_inherit_mm_stage_or_row_split_overrides(self):
+        for backend in ("auto", "cutlass", "cudnn"):
+            for stage_logging in ("0", "1"):
+                shell_env = {**self.asset_env(Path("/deploy/h3")),
+                             "OMNI_NVFP4_MM_BACKEND": backend, "OMNI_STAGE_LOGGING": stage_logging,
+                             "FASTVIDEO_NVFP4_MM_BACKEND": "unrequested",
+                             "FASTVIDEO_NVFP4_MM_ROW_SPLIT": "auto", "FASTVIDEO_STAGE_LOGGING": "wrong"}
+                with self.subTest(backend=backend, stage_logging=stage_logging), \
+                        patch.dict(os.environ, shell_env, clear=True), patch.object(control.subprocess, "run") as run:
+                    _, env, paths = control.settings("sp2")
+                    control.validate(Path("/deploy/h3/run/config.json"), paths, env)
+                effective = run.call_args.kwargs["env"]
+                self.assertEqual(effective["FASTVIDEO_NVFP4_MM_BACKEND"], backend)
+                self.assertEqual(effective["FASTVIDEO_STAGE_LOGGING"], stage_logging)
+                self.assertEqual(effective["FASTVIDEO_NVFP4_MM_ROW_SPLIT"], "off")
+
+    def test_actual_start_fingerprints_each_mm_and_stage_combination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "run/omni"
+            run.mkdir(parents=True)
+            fingerprints = set()
+            captured = {}
+
+            def popen(argv, **kwargs):
+                captured.update(argv=argv, **kwargs)
+                return NS(pid=123, poll=lambda: None)
+
+            def proc_identity(pid):
+                return {"start_ticks": "42", "cmdline": [arg.encode() for arg in captured["argv"]]}
+
+            for backend in ("auto", "cutlass", "cudnn"):
+                for stage_logging in ("0", "1"):
+                    with self.subTest(backend=backend, stage_logging=stage_logging), \
+                            patch.dict(os.environ, {**self.asset_env(root), "OMNI_NVFP4_MM_BACKEND": backend,
+                                "OMNI_STAGE_LOGGING": stage_logging, "FASTVIDEO_NVFP4_MM_ROW_SPLIT": "table"}, clear=True), \
+                            patch.object(control, "asset_identity", return_value={"verified": True}), \
+                            patch.object(control, "inspect_patch", return_value={"state": "native"}), \
+                            patch.object(control, "sha256", return_value="a" * 64), \
+                            patch.object(control, "read_state", return_value=None), \
+                            patch.object(control.socket, "socket"), patch.object(control, "validate"), \
+                            patch.object(control.subprocess, "Popen", side_effect=popen), \
+                            patch.object(control, "proc_identity", side_effect=proc_identity):
+                        result = control.start("sp2", run)
+                    fingerprints.add(result["fingerprint"])
+                    effective = captured["env"]
+                    self.assertEqual(effective["FASTVIDEO_NVFP4_MM_BACKEND"], backend)
+                    self.assertEqual(effective["FASTVIDEO_STAGE_LOGGING"], stage_logging)
+                    self.assertEqual(effective["FASTVIDEO_NVFP4_MM_ROW_SPLIT"], "off")
+                    identity = json.loads(Path(result["log"]).read_text().splitlines()[0])["identity"]
+                    self.assertEqual(identity["env"]["FASTVIDEO_NVFP4_MM_BACKEND"], backend)
+                    self.assertEqual(identity["env"]["FASTVIDEO_STAGE_LOGGING"], stage_logging)
+            self.assertEqual(len(fingerprints), 6)
+
     def test_memory_options_change_only_requested_recipe_fields(self):
         for profile in ("sp1", "sp2"):
             with self.subTest(profile=profile), patch.dict(os.environ, self.asset_env(Path("/deploy/h3")), clear=True):
