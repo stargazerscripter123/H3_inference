@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "evidence_scope": "Public upstream metadata and static source audit only; no GPU validation by this artifact.",
+  "comfyui": {
+    "repository": "https://github.com/Comfy-Org/ComfyUI",
+    "commit": "b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c",
+    "version": "0.42.0",
+    "required_custom_nodes": []
+  },
+  "environment": {
+    "python": "3.12.15",
+    "torch": "2.12.0+cu130",
+    "torchvision": "0.27.0+cu130",
+    "comfy-kitchen": "0.2.39",
+    "comfy-aimdo": "0.5.6",
+    "comfyui-frontend-package": "1.55.18",
+    "comfyui-workflow-templates": "0.11.89",
+    "comfyui-embedded-docs": "0.5.14",
+    "status": "Root-selected deployment environment; official validation instead used Torch 2.9.0a0+50eac811a6.nv25.09 / CUDA13.0 / GB200."
+  },
+  "kitchen_python312_linux_wheel": {
+    "filename": "comfy_kitchen-0.2.39-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "url": "https://files.pythonhosted.org/packages/1e/17/26fd6ff4bf81c89f9c8aa944ed8b0570df72134b71f0c9e94a4110bc20be/comfy_kitchen-0.2.39-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "size_bytes": 65836259,
+    "sha256": "36a97072e27d30df04563548dc7344abc364777f2262aab44a250c1fd1594d58"
+  },
+  "models": [
+    {
+      "component": "dit",
+      "repo_id": "FastVideo/FastH3-Omni-NVFP4-QAD-Comfy",
+      "revision": "36dbf15cd11113471114b1040c4f38646c031549",
+      "source_path": "fasth3_omniref_qad_nvfp4_comfy.safetensors",
+      "comfy_models_relative_path": "diffusion_models/fasth3_omniref_qad_nvfp4_comfy.safetensors",
+      "size_bytes": 13773998700,
+      "sha256": "bf25ee58df65b4dfee349d612f7ac62a2fea0dddd1e68eb37e75c8ce8b166f5a",
+      "url": "https://huggingface.co/FastVideo/FastH3-Omni-NVFP4-QAD-Comfy/resolve/36dbf15cd11113471114b1040c4f38646c031549/fasth3_omniref_qad_nvfp4_comfy.safetensors"
+    },
+    {
+      "component": "text_encoder_with_vision",
+      "repo_id": "FastVideo/FastH3-Omni-Comfy",
+      "revision": "82eff2a6eee6c962846879f4bab52610a4df24d3",
+      "source_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "comfy_models_relative_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size_bytes": 15687142551,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "url": "https://huggingface.co/FastVideo/FastH3-Omni-Comfy/resolve/82eff2a6eee6c962846879f4bab52610a4df24d3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    },
+    {
+      "component": "video_vae",
+      "repo_id": "FastVideo/FastH3-Omni-Comfy",
+      "revision": "82eff2a6eee6c962846879f4bab52610a4df24d3",
+      "source_path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "comfy_models_relative_path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "size_bytes": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "url": "https://huggingface.co/FastVideo/FastH3-Omni-Comfy/resolve/82eff2a6eee6c962846879f4bab52610a4df24d3/vae/minimax_h3_video_vae_fp16.safetensors"
+    },
+    {
+      "component": "audio_vae",
+      "repo_id": "FastVideo/FastH3-Omni-Comfy",
+      "revision": "82eff2a6eee6c962846879f4bab52610a4df24d3",
+      "source_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "comfy_models_relative_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size_bytes": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "url": "https://huggingface.co/FastVideo/FastH3-Omni-Comfy/resolve/82eff2a6eee6c962846879f4bab52610a4df24d3/vae/minimax_h3_audio_vae_fp32.safetensors"
+    }
+  ],
+  "total_model_bytes": 35274204555,
+  "workflow_template": {
+    "repository": "https://github.com/Comfy-Org/workflow_templates",
+    "commit": "e7cd011d4ded3411c2f481200544f0be6fdc962e",
+    "path": "templates/video_minimax_h3_r2v.json",
+    "sha256": "afeea99e9fd5a1456df348e0573e289c1243f2f28546fc95c1c963f808d61ddb",
+    "use": "Reference topology only; replace base diffusion model, disable Turbo LoRA branches, replace sampler/schedule/steps/canvas."
+  },
+  "baseline": {
+    "width": 480,
+    "height": 832,
+    "length": 362,
+    "fps": 24,
+    "steps": 8,
+    "guidance": 1.0,
+    "sampler": "euler",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "shift_video": 12.0,
+    "shift_audio": 3.0,
+    "guider": "BasicGuider",
+    "lora": null,
+    "gpu_count": 1,
+    "distributed_sequence_parallel": false,
+    "video_decoder": "full H3 video VAE fp16, differs from FastVideo 36L NVFP4 decoder"
+  },
+  "reference_policy": {
+    "target": "cap480, aspect-preserving, no upscaling, floor to 32 grid as current FastVideo business policy",
+    "input_preparation": "Pre-resize authorized input bytes to exactly the FastVideo transformed dimensions; preserve ordered references and prompt text. Never inspect media in AI context.",
+    "native_node_ref_image_size": "max",
+    "reason": "At fixed Comfy pin, match caps area at width*height; max caps short edge at2048. On already cap480 and32-aligned files, max preserves dimensions exactly.",
+    "native_source": "comfy_extras/nodes_minimax_h3.py:297-313",
+    "semantic_limit": "Reference images are conditioning, not separate hard first-frame input."
+  },
+  "api_notes": {
+    "reference_input_keys": "ref_images.ref_image_0 through ref_images.ref_image_8, in source order",
+    "reference_outputs": [
+      "positive",
+      "LATENT"
+    ],
+    "shift_node": "MiniMaxH3SigmaShift",
+    "save_node": "SaveVideo",
+    "save_flat_inputs": {
+      "format": "mp4",
+      "format.codec": "h264",
+      "format.codec.encoding": "auto"
+    },
+    "save_history_field": "outputs[save_node_id].images[] with filename/subfolder/type; animated=true",
+    "success": "Check history status completed+success and owned MP4 exists; executed event alone is insufficient.",
+    "metadata": "Prefer Comfy --disable-metadata to avoid embedding private prompts/workflow in exported MP4."
+  },
+  "sources": [
+    "https://huggingface.co/FastVideo/FastH3-Omni-NVFP4-QAD-Comfy/blob/36dbf15cd11113471114b1040c4f38646c031549/provenance/VALIDATION.md",
+    "https://huggingface.co/FastVideo/FastH3-Omni-Comfy/blob/82eff2a6eee6c962846879f4bab52610a4df24d3/README.md",
+    "https://github.com/Comfy-Org/ComfyUI/blob/b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c/comfy_extras/nodes_minimax_h3.py",
+    "https://github.com/Comfy-Org/ComfyUI/blob/b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c/comfy_extras/nodes_video.py"
+  ]
+}
