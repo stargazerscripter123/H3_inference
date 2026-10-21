@@ -1,0 +1,383 @@
+{
+  "source_url": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+  "license": "CC BY 3.0",
+  "attribution": "Tears of Steel — Blender Foundation | mango.blender.org",
+  "license_source": "https://mango.blender.org/about/",
+  "changes": "Timestamp excerpts; resized images/video; video soundtrack removed; audio resampled to 32-kHz stereo.",
+  "source_timeline": "full-film seconds",
+  "source_file_sha256": null,
+  "assets": [
+    {
+      "id": "s1_w_image_1",
+      "case_id": "S1-single-image",
+      "variant": "w",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s1_w_image_1.png",
+      "source_start_seconds": 240.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s1_a_image_1",
+      "case_id": "S1-single-image",
+      "variant": "a",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s1_a_image_1.png",
+      "source_start_seconds": 55.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s1_b_image_1",
+      "case_id": "S1-single-image",
+      "variant": "b",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s1_b_image_1.png",
+      "source_start_seconds": 90.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s2_w_image_1",
+      "case_id": "S2-multiple-images",
+      "variant": "w",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_w_image_1.png",
+      "source_start_seconds": 241.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s2_w_image_2",
+      "case_id": "S2-multiple-images",
+      "variant": "w",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_w_image_2.png",
+      "source_start_seconds": 241.5,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s2_a_image_1",
+      "case_id": "S2-multiple-images",
+      "variant": "a",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_a_image_1.png",
+      "source_start_seconds": 56.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s2_a_image_2",
+      "case_id": "S2-multiple-images",
+      "variant": "a",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_a_image_2.png",
+      "source_start_seconds": 56.5,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s2_b_image_1",
+      "case_id": "S2-multiple-images",
+      "variant": "b",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_1.png",
+      "source_start_seconds": 91.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s2_b_image_2",
+      "case_id": "S2-multiple-images",
+      "variant": "b",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s2_b_image_2.png",
+      "source_start_seconds": 91.5,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s3_w_image_1",
+      "case_id": "S3-image-audio",
+      "variant": "w",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s3_w_image_1.png",
+      "source_start_seconds": 242.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s3_w_audio_2",
+      "case_id": "S3-image-audio",
+      "variant": "w",
+      "type": "audio",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s3_w_audio_2.wav",
+      "source_start_seconds": 242.0,
+      "duration_seconds": 4.0,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 0,
+        "audio_streams": 1,
+        "sample_rate": 32000,
+        "channels": 2,
+        "duration_seconds": 4.0
+      }
+    },
+    {
+      "id": "s3_a_image_1",
+      "case_id": "S3-image-audio",
+      "variant": "a",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s3_a_image_1.png",
+      "source_start_seconds": 57.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s3_a_audio_2",
+      "case_id": "S3-image-audio",
+      "variant": "a",
+      "type": "audio",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s3_a_audio_2.wav",
+      "source_start_seconds": 57.0,
+      "duration_seconds": 4.0,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 0,
+        "audio_streams": 1,
+        "sample_rate": 32000,
+        "channels": 2,
+        "duration_seconds": 4.0
+      }
+    },
+    {
+      "id": "s3_b_image_1",
+      "case_id": "S3-image-audio",
+      "variant": "b",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s3_b_image_1.png",
+      "source_start_seconds": 92.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s3_b_audio_2",
+      "case_id": "S3-image-audio",
+      "variant": "b",
+      "type": "audio",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s3_b_audio_2.wav",
+      "source_start_seconds": 92.0,
+      "duration_seconds": 4.0,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 0,
+        "audio_streams": 1,
+        "sample_rate": 32000,
+        "channels": 2,
+        "duration_seconds": 4.0
+      }
+    },
+    {
+      "id": "s4_w_image_1",
+      "case_id": "S4-image-video",
+      "variant": "w",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s4_w_image_1.png",
+      "source_start_seconds": 243.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s4_w_video_2",
+      "case_id": "S4-image-video",
+      "variant": "w",
+      "type": "video",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s4_w_video_2.mp4",
+      "source_start_seconds": 243.0,
+      "duration_seconds": 4.0,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "fps": 24,
+        "decoded_frames": 96,
+        "duration_seconds": 4.0
+      }
+    },
+    {
+      "id": "s4_a_image_1",
+      "case_id": "S4-image-video",
+      "variant": "a",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s4_a_image_1.png",
+      "source_start_seconds": 58.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s4_a_video_2",
+      "case_id": "S4-image-video",
+      "variant": "a",
+      "type": "video",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s4_a_video_2.mp4",
+      "source_start_seconds": 58.0,
+      "duration_seconds": 4.0,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "fps": 24,
+        "decoded_frames": 96,
+        "duration_seconds": 4.0
+      }
+    },
+    {
+      "id": "s4_b_image_1",
+      "case_id": "S4-image-video",
+      "variant": "b",
+      "type": "image",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s4_b_image_1.png",
+      "source_start_seconds": 93.0,
+      "duration_seconds": null,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "decoded_frames": 1
+      }
+    },
+    {
+      "id": "s4_b_video_2",
+      "case_id": "S4-image-video",
+      "variant": "b",
+      "type": "video",
+      "path": "/home/isaac/workdir/h3/inputs/tos/bench32-v1/s4_b_video_2.mp4",
+      "source_start_seconds": 93.0,
+      "duration_seconds": 4.0,
+      "sha256": null,
+      "verification_status": "not_created_or_verified",
+      "expected_metadata": {
+        "video_streams": 1,
+        "audio_streams": 0,
+        "height": 480,
+        "fps": 24,
+        "decoded_frames": 96,
+        "duration_seconds": 4.0
+      }
+    }
+  ],
+  "must_verify_before_run": [
+    "Full-film source provenance and hash, or URL plus source excerpt evidence",
+    "Every derivative SHA-256 and ffprobe metadata match its declared type/geometry/duration",
+    "All same-type derivatives have distinct SHA-256; different paths alone do not establish new content",
+    "No benchmark reference content was used earlier in this service process"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "status": "schema_dry_validation_passed",
+  "rows_per_profile": 20,
+  "measured_per_profile": 16,
+  "warmups_per_profile": 4,
+  "profiles": [
+    "sp1",
+    "sp2"
+  ],
+  "total_measured": 32,
+  "total_explicit_warmups": 8,
+  "derivative_assets": 21,
+  "api_payloads_built_without_network": 20,
+  "run_omni_sha256": "9e66fd4a0c63c09f4d1c971ffec975aa94727627c6539e1efc19df0b01f47c1c",
+  "bench_omni_sha256": "f22f02d75e1ab279c0863a56a9906032cc2ae31e2a573e04068baaec568af44b",
+  "media_exists_or_hash_verified": false,
+  "media_opened": false,
+  "gpu_generation_executed": false
+}
