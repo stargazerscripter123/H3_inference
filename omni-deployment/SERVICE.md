@@ -70,6 +70,35 @@ The executor's final `peak_memory_mb` is not the whole-request peak because
 stage logging resets allocator peaks; use the maximum stage peak per rank and
 external GPU/host samples. Report the latter as device-level sampled memory.
 
+Two optional memory settings accept exactly `0` or `1`; both default to `0`:
+
+- `OMNI_VAE_OFFLOAD=1` sets `generator.engine.offload.vae=true`. The pinned
+  native offload path moves both video and audio VAEs off the GPU between
+  relevant stages and clears video NVFP4 decoder graphs when moving to CPU.
+  It keeps the same model weights, decoder, reference limit and sampling
+  settings, but adds PCIe transfers and graph rebuilding. It does not guarantee
+  that every reference/frame combination will fit.
+- `OMNI_EXPANDABLE_SEGMENTS=1` sets
+  `PYTORCH_ALLOC_CONF=expandable_segments:True`. At `0`, the controller explicitly
+  sets `PYTORCH_ALLOC_CONF=backend:native`. Both validation and startup remove
+  inherited `PYTORCH_ALLOC_CONF` and legacy `PYTORCH_CUDA_ALLOC_CONF` before
+  applying this value, so unrelated shell allocator settings cannot change the
+  experiment.
+
+Both effective settings enter the service fingerprint. To inspect the combined
+candidate without starting a process:
+
+```bash
+OMNI_VAE_OFFLOAD=1 OMNI_EXPANDABLE_SEGMENTS=1 \
+  python3 omni-deployment/scripts/omni_control.py render sp2
+```
+
+Use the same flags for validation and startup after explicitly stopping the
+previous service. Record this as a separate benchmark variant; a run with both
+enabled cannot identify either setting's individual effect. Explicitly set both
+to `0` for subsequent baseline runs if they were exported in the shell. This
+package does not enable either option on the target host by itself.
+
 ## Lifecycle
 
 The controller owns one service at a time, guarded by `run/omni/control.lock`.
@@ -122,11 +151,13 @@ check; a completed smoke request remains necessary to test GPU execution.
 
 - Both final templates parsed through the pinned upstream `ServeConfig` parser.
 - Python compilation passed.
-- Twelve CPU-only tests passed: Ray handles without `proc`, failed/restarting or
+- Nineteen CPU-only service/controller tests passed: Ray handles without `proc`, failed/restarting or
   missing actors, GCS failure, shutdown/error state, MP fallback, PID reuse and
   owner/group/token mismatch refusal, venv executable symlink preservation,
   CUDA/media defaults and overrides, relative-path refusal, and project-tool
-  precedence over unrelated executables in the inherited PATH.
+  precedence over unrelated executables in the inherited PATH, current Ray node
+  resource matching, strict memory flags, allocator sanitization at validation
+  and process startup, and distinct fingerprints for all four memory variants.
 - GPU load, Ray startup/shutdown, API smoke and performance require target-host
   verification. `validate` additionally invokes pinned upstream config-to-engine
   conversion with the real target environment before any service startup.

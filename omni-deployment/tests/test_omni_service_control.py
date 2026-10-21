@@ -1,5 +1,6 @@
 """CPU-only safety/compatibility tests; no GPU, Ray, network or service startup."""
 from pathlib import Path
+import json
 import os
 import shutil
 import sys
@@ -97,6 +98,83 @@ class ToolchainSettingsTest(unittest.TestCase):
                                                                key: "relative/toolchain"}, clear=True):
                 with self.assertRaisesRegex(ValueError, key + " must be an absolute path"):
                     control.settings("sp1")
+
+    def test_memory_options_default_to_resident_vae_and_native_allocator(self):
+        for profile in ("sp1", "sp2"):
+            with self.subTest(profile=profile), patch.dict(os.environ, self.asset_env(Path("/deploy/h3")), clear=True):
+                config, env, _ = control.settings(profile)
+            self.assertIs(config["generator"]["engine"]["offload"]["vae"], False)
+            self.assertEqual(env["PYTORCH_ALLOC_CONF"], "backend:native")
+
+    def test_memory_options_change_only_requested_recipe_fields(self):
+        for profile in ("sp1", "sp2"):
+            with self.subTest(profile=profile), patch.dict(os.environ, self.asset_env(Path("/deploy/h3")), clear=True):
+                baseline_config, baseline_env, baseline_paths = control.settings(profile)
+                os.environ.update(OMNI_VAE_OFFLOAD="1", OMNI_EXPANDABLE_SEGMENTS="1")
+                config, env, paths = control.settings(profile)
+            self.assertIs(config["generator"]["engine"]["offload"]["vae"], True)
+            self.assertEqual(env["PYTORCH_ALLOC_CONF"], "expandable_segments:True")
+            config["generator"]["engine"]["offload"]["vae"] = False
+            env["PYTORCH_ALLOC_CONF"] = "backend:native"
+            self.assertEqual((config, env, paths), (baseline_config, baseline_env, baseline_paths))
+
+    def test_memory_flags_require_exact_zero_or_one(self):
+        for name in ("OMNI_VAE_OFFLOAD", "OMNI_EXPANDABLE_SEGMENTS"):
+            for value in ("true", "false", "2", "-1", "", " 1", "1 "):
+                with self.subTest(name=name, value=value), patch.dict(os.environ, {
+                        **self.asset_env(Path("/deploy/h3")), name: value}, clear=True):
+                    with self.assertRaisesRegex(ValueError, name + " must be 0 or 1"):
+                        control.settings("sp2")
+
+    def test_validation_subprocess_cannot_inherit_allocator_aliases(self):
+        for enabled, expected in (("0", "backend:native"), ("1", "expandable_segments:True")):
+            shell_env = {**self.asset_env(Path("/deploy/h3")), "OMNI_EXPANDABLE_SEGMENTS": enabled,
+                         "PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync",
+                         "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128"}
+            with self.subTest(enabled=enabled), patch.dict(os.environ, shell_env, clear=True), \
+                    patch.object(control.subprocess, "run") as run:
+                _, env, paths = control.settings("sp2")
+                control.validate(Path("/deploy/h3/run/config.json"), paths, env)
+            child_env = run.call_args.kwargs["env"]
+            self.assertEqual(child_env["PYTORCH_ALLOC_CONF"], expected)
+            self.assertNotIn("PYTORCH_CUDA_ALLOC_CONF", child_env)
+
+    def test_start_sanitizes_allocator_and_fingerprints_both_memory_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "run/omni"
+            run.mkdir(parents=True)
+            fingerprints = set()
+            for vae, expandable in (("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")):
+                captured = {}
+
+                def popen(argv, **kwargs):
+                    captured.update(argv=argv, **kwargs)
+                    return NS(pid=123, poll=lambda: None)
+
+                def proc_identity(pid):
+                    return {"start_ticks": "42", "cmdline": [arg.encode() for arg in captured["argv"]]}
+
+                shell_env = {**self.asset_env(root), "OMNI_VAE_OFFLOAD": vae,
+                             "OMNI_EXPANDABLE_SEGMENTS": expandable,
+                             "PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync",
+                             "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128"}
+                with self.subTest(vae=vae, expandable=expandable), \
+                        patch.dict(os.environ, shell_env, clear=True), \
+                        patch.object(control, "asset_identity", return_value={"verified": True}), \
+                        patch.object(control, "sha256", return_value="a" * 64), \
+                        patch.object(control, "read_state", return_value=None), \
+                        patch.object(control.socket, "socket"), patch.object(control, "validate"), \
+                        patch.object(control.subprocess, "Popen", side_effect=popen), \
+                        patch.object(control, "proc_identity", side_effect=proc_identity):
+                    result = control.start("sp2", run)
+                fingerprints.add(result["fingerprint"])
+                expected = "expandable_segments:True" if expandable == "1" else "backend:native"
+                self.assertEqual(captured["env"]["PYTORCH_ALLOC_CONF"], expected)
+                self.assertNotIn("PYTORCH_CUDA_ALLOC_CONF", captured["env"])
+                config = json.loads(Path(result["config"]).read_text())
+                self.assertIs(config["generator"]["engine"]["offload"]["vae"], vae == "1")
+            self.assertEqual(len(fingerprints), 4)
 
 
 class RayHealthTest(unittest.TestCase):

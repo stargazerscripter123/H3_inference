@@ -6,7 +6,7 @@ image/video/audio generation requests and sequential benchmarks. SP2 means
 sequence parallelism with replicated NVFP4 weights and parallel VAE; TP stays 1.
 Two 32-GB cards do not become one 64-GB memory pool.
 
-**Status on 2026-10-21:** 41 CPU tests and targeted GPU/operator tests passed.
+**Status on 2026-10-21:** 48 CPU tests and targeted GPU/operator tests passed.
 All 47 pinned model assets (68,579,945,084 bytes) are verified; the two-mode
 AdaLN table is prepared with eight completed forwards per diagnostic request.
 Fresh SP1 table reuse passed image, multi-image and image+audio at 124 frames;
@@ -34,6 +34,8 @@ The new host reports Pop!_OS 24.04, driver 595.104.02, about 125 GiB RAM, GPU0
 PCIe x16 and GPU1 x8. GPU topology remains NODE with peer access unavailable.
 SP2 speedup must therefore be measured on this machine. Historical H3/vLLM TP2
 results are not measurements of this Omni executor, model or operating system.
+
+中文操作入口：[RUNBOOK.zh-CN.md](RUNBOOK.zh-CN.md)。
 
 ## Package contents
 

@@ -91,11 +91,20 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
         return obj
 
     config = replace(config)
+    flags = {}
+    for name in ("OMNI_VAE_OFFLOAD", "OMNI_EXPANDABLE_SEGMENTS"):
+        value = os.environ.get(name, "0")
+        if value not in {"0", "1"}:
+            raise ValueError(f"{name} must be 0 or 1")
+        flags[name] = value == "1"
+    config["generator"]["engine"]["offload"]["vae"] = flags["OMNI_VAE_OFFLOAD"]
     port = int(os.environ.get("OMNI_PORT", "8108"))
     if not 1024 <= port <= 65535:
         raise ValueError("OMNI_PORT must be between 1024 and 65535")
     config["server"]["port"] = port
     env = dict(RECIPE_ENV)
+    env["PYTORCH_ALLOC_CONF"] = ("expandable_segments:True" if flags["OMNI_EXPANDABLE_SEGMENTS"]
+                                 else "backend:native")
     env.update({"FASTVIDEO_H3_ADALN_TABLE": values["OMNI_ADALN_TABLE"],
                 "FASTVIDEO_H3_SP_PROFILE": os.environ.get("OMNI_SP_PROFILE", "0"),
                 "FASTVIDEO_H3_VAE_NVFP4_DECODER": values["OMNI_DECODER"],
@@ -208,12 +217,18 @@ def read_state(run: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def validate(config_path: Path, paths: dict, env: dict) -> None:
-    child_env = {k: v for k, v in os.environ.items() if not k.startswith(("FASTVIDEO_", "RAY_", "NCCL_"))}
+def child_environment(env: dict) -> dict:
+    child_env = {k: v for k, v in os.environ.items()
+                 if not k.startswith(("FASTVIDEO_", "RAY_", "NCCL_"))
+                 and k not in {"PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"}}
     child_env.update(env)
+    return child_env
+
+
+def validate(config_path: Path, paths: dict, env: dict) -> None:
     subprocess.run([paths["python"], str(HERE / "omni_service.py"), "--config", str(config_path),
                     "--source", paths["source"], "--owner-token", "validation", "--validate-only"],
-                   check=True, env=child_env, cwd=paths["source"])
+                   check=True, env=child_environment(env), cwd=paths["source"])
 
 
 def start(profile: str, run: Path) -> dict:
@@ -238,15 +253,13 @@ def start(profile: str, run: Path) -> dict:
     atomic_json(config_path, config)
     validate(config_path, paths, env)
     log_path = Path(paths["root"]) / "logs/omni" / f"{time.strftime('%Y%m%d-%H%M%S')}-{profile}-{token[:8]}.log"
-    child_env = {k: v for k, v in os.environ.items() if not k.startswith(("FASTVIDEO_", "RAY_", "NCCL_"))}
-    child_env.update(env)
     with log_path.open("x") as log, open(os.devnull, "rb") as null:
         log.write(json.dumps({"identity": identity, "owner_token": token, "config": str(config_path)}) + "\n")
         log.flush()
         process = subprocess.Popen([paths["python"], "-u", str(HERE / "omni_service.py"), "--config", str(config_path),
                                     "--source", paths["source"], "--owner-token", token],
                                    stdin=null, stdout=log, stderr=subprocess.STDOUT, cwd=paths["source"],
-                                   env=child_env, start_new_session=True, close_fds=True)
+                                   env=child_environment(env), start_new_session=True, close_fds=True)
     info = None
     for _ in range(50):
         if process.poll() is not None:

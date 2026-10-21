@@ -1,0 +1,1338 @@
+{
+  "status": "partial",
+  "profile": "SP2 native resident VAE, allocator default, memo16",
+  "sp_profile": 1,
+  "formal_benchmark": false,
+  "rows": [
+    {
+      "name": "S4_image_video_124",
+      "outcome": "succeeded",
+      "attempted": true,
+      "frames": 124,
+      "seed": 2127,
+      "client_to_media_s": 138.60510914499173,
+      "not_run_reason": null,
+      "request": {
+        "task": "ref2va",
+        "prompt": "Use the character appearance from the first image and the camera motion and laboratory atmosphere from the video reference. The character looks around the room and slowly turns toward the camera. Natural room ambience.",
+        "seed": 2127,
+        "width": 832,
+        "height": 480,
+        "num_frames": 124,
+        "fps": 24,
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0,
+        "num_outputs_per_prompt": 1,
+        "image_reference": [
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          }
+        ],
+        "video_reference": [
+          {
+            "video_url": "/home/isaac/workdir/h3/inputs/tos/reference-video-055.mp4"
+          }
+        ]
+      },
+      "references": [
+        {
+          "index": 0,
+          "type": "image",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png",
+          "sha256": "4934413a73b83233f744e1425419b5a131cf0140476e593cb9a67d91431bc984",
+          "bytes": 446476,
+          "verified_on_client": true
+        },
+        {
+          "index": 1,
+          "type": "video",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-video-055.mp4",
+          "sha256": "62b871ebd23ee71180cf150c350277d824ac08f262271fadae90317063d05385",
+          "bytes": 984526,
+          "verified_on_client": true
+        }
+      ],
+      "manifest_path": "/home/isaac/workdir/h3/outputs/omni-sp2-diagnostic-001/bench_20261021T075331Z_6326b080bf75/omni_20261021T075331Z_7a84c8ca4748/manifest.json",
+      "timings": {
+        "server_full_request_s": null,
+        "server_full_request_note": "not exposed by the pinned async API; inference_time_s is reported separately",
+        "client_submit_s": 0.019828392993076704,
+        "client_to_completed_s": 138.55975512499572,
+        "server_reported_inference_s": 137.60941515000013,
+        "server_stage_durations": {
+          "input_preparation_stage": 1.4389681759930681,
+          "conditioning_stage": 4.058501465988229,
+          "latent_preparation_stage": 17.427779417994316,
+          "denoising_stage": 98.19535855700087,
+          "video_decoding_stage": 2.078568056007498,
+          "audio_decoding_stage": 0.059908851006184705,
+          "PostDecodeFrameProcessStage": 0.019784296993748285,
+          "VideoSaveStage": 0.11952392300008796,
+          "AudioMuxStage": 0.0
+        },
+        "client_to_media_s": 138.60510914499173,
+        "local_validation_s": 0.0788061709899921,
+        "client_to_validated_s": 138.6841391709895
+      },
+      "server_model": "fasth3-omni-qad-sp2-dd7918d0cdb3",
+      "media": {
+        "valid": true,
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "video_duration_s": 5.166667,
+        "audio_duration_s": 5.166656,
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "bytes": 1710697,
+        "sha256": "8ee78d7dbf5f0be8197db588a8a1a4b41dfd01389fc42ebbdbac2348b2f51ab2"
+      }
+    },
+    {
+      "name": "S1_image_124",
+      "outcome": "succeeded",
+      "attempted": true,
+      "frames": 124,
+      "seed": 2124,
+      "client_to_media_s": 43.12145831799717,
+      "not_run_reason": null,
+      "request": {
+        "task": "ref2va",
+        "prompt": "Keep the character and lighting from the reference image. The man slowly raises his eyes, takes a breath, and looks to his left. The camera holds a steady close-up. Natural quiet ambient sound.",
+        "seed": 2124,
+        "width": 832,
+        "height": 480,
+        "num_frames": 124,
+        "fps": 24,
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0,
+        "num_outputs_per_prompt": 1,
+        "image_reference": [
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          }
+        ]
+      },
+      "references": [
+        {
+          "index": 0,
+          "type": "image",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png",
+          "sha256": "c88707b957522299f98bcbf953aba88d5403f2e5348bc24152b26ba978e3e96f",
+          "bytes": 529358,
+          "verified_on_client": true
+        }
+      ],
+      "manifest_path": "/home/isaac/workdir/h3/outputs/omni-sp2-diagnostic-001/bench_20261021T075331Z_6326b080bf75/omni_20261021T075550Z_f5f265902ecb/manifest.json",
+      "timings": {
+        "server_full_request_s": null,
+        "server_full_request_note": "not exposed by the pinned async API; inference_time_s is reported separately",
+        "client_submit_s": 0.007464625989086926,
+        "client_to_completed_s": 43.11319398699561,
+        "server_reported_inference_s": 42.39823391499522,
+        "server_stage_durations": {
+          "input_preparation_stage": 0.055096098003559746,
+          "conditioning_stage": 1.9221056000096723,
+          "latent_preparation_stage": 2.6264825459948042,
+          "denoising_stage": 32.05786957099917,
+          "video_decoding_stage": 0.9854620740079554,
+          "audio_decoding_stage": 0.033508787004393525,
+          "PostDecodeFrameProcessStage": 0.010379891988122836,
+          "VideoSaveStage": 0.13481693700305186,
+          "AudioMuxStage": 0.0
+        },
+        "client_to_media_s": 43.12145831799717,
+        "local_validation_s": 0.06612190601299517,
+        "client_to_validated_s": 43.18779298198933
+      },
+      "server_model": "fasth3-omni-qad-sp2-dd7918d0cdb3",
+      "media": {
+        "valid": true,
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "video_duration_s": 5.166667,
+        "audio_duration_s": 5.166656,
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "bytes": 1131676,
+        "sha256": "ef9a186cdef6c93ca0fa0dc230555928e1afe691d7c20236d7175d9087fc40bf"
+      }
+    },
+    {
+      "name": "S2_multi_image_124",
+      "outcome": "succeeded",
+      "attempted": true,
+      "frames": 124,
+      "seed": 2125,
+      "client_to_media_s": 125.34366636899358,
+      "not_run_reason": null,
+      "request": {
+        "task": "ref2va",
+        "prompt": "Keep the man from the first image and the laboratory setting from the second and third images. He turns toward the workbench and carefully places an object on the table. Preserve the reference appearances and natural lighting. Quiet room ambience.",
+        "seed": 2125,
+        "width": 832,
+        "height": 480,
+        "num_frames": 124,
+        "fps": 24,
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0,
+        "num_outputs_per_prompt": 1,
+        "image_reference": [
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          },
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          },
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/reference-image-240.png"
+          }
+        ]
+      },
+      "references": [
+        {
+          "index": 0,
+          "type": "image",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png",
+          "sha256": "c88707b957522299f98bcbf953aba88d5403f2e5348bc24152b26ba978e3e96f",
+          "bytes": 529358,
+          "verified_on_client": true
+        },
+        {
+          "index": 1,
+          "type": "image",
+          "index_within_type": 2,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png",
+          "sha256": "4934413a73b83233f744e1425419b5a131cf0140476e593cb9a67d91431bc984",
+          "bytes": 446476,
+          "verified_on_client": true
+        },
+        {
+          "index": 2,
+          "type": "image",
+          "index_within_type": 3,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-240.png",
+          "sha256": "72ee91e10076781ef0777ef651b448f7d5c1e525b9d89928f0c6b9b35c5d3308",
+          "bytes": 410882,
+          "verified_on_client": true
+        }
+      ],
+      "manifest_path": "/home/isaac/workdir/h3/outputs/omni-sp2-diagnostic-001/bench_20261021T075331Z_6326b080bf75/omni_20261021T075633Z_9862aa9dd82e/manifest.json",
+      "timings": {
+        "server_full_request_s": null,
+        "server_full_request_note": "not exposed by the pinned async API; inference_time_s is reported separately",
+        "client_submit_s": 0.02276498099672608,
+        "client_to_completed_s": 125.34005113599414,
+        "server_reported_inference_s": 125.13222918899555,
+        "server_stage_durations": {
+          "input_preparation_stage": 0.1690503369900398,
+          "conditioning_stage": 7.157092574998387,
+          "latent_preparation_stage": 2.670540979001089,
+          "denoising_stage": 111.83862641800079,
+          "video_decoding_stage": 1.0066455900087021,
+          "audio_decoding_stage": 0.033239736992982216,
+          "PostDecodeFrameProcessStage": 0.010155447002034634,
+          "VideoSaveStage": 0.13802607799880207,
+          "AudioMuxStage": 0.0
+        },
+        "client_to_media_s": 125.34366636899358,
+        "local_validation_s": 0.0800627630087547,
+        "client_to_validated_s": 125.42387316699023
+      },
+      "server_model": "fasth3-omni-qad-sp2-dd7918d0cdb3",
+      "media": {
+        "valid": true,
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "video_duration_s": 5.166667,
+        "audio_duration_s": 5.166656,
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "bytes": 1825143,
+        "sha256": "f2789b7fd6f28d02287561b3821cc00fe18e03820d1234a3769df44808e53e73"
+      }
+    },
+    {
+      "name": "S3_image_audio_124",
+      "outcome": "succeeded",
+      "attempted": true,
+      "frames": 124,
+      "seed": 2126,
+      "client_to_media_s": 39.10201878199587,
+      "not_run_reason": null,
+      "request": {
+        "task": "ref2va",
+        "prompt": "Use the character appearance from the image and the voice characteristics from the audio reference. The man calmly says: We need more time. Show natural mouth motion and subtle head movement in a steady close-up.",
+        "seed": 2126,
+        "width": 832,
+        "height": 480,
+        "num_frames": 124,
+        "fps": 24,
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0,
+        "num_outputs_per_prompt": 1,
+        "image_reference": [
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          }
+        ],
+        "audio_reference": [
+          {
+            "audio_url": "/home/isaac/workdir/h3/inputs/tos/reference-audio-055.wav"
+          }
+        ]
+      },
+      "references": [
+        {
+          "index": 0,
+          "type": "image",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png",
+          "sha256": "c88707b957522299f98bcbf953aba88d5403f2e5348bc24152b26ba978e3e96f",
+          "bytes": 529358,
+          "verified_on_client": true
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-audio-055.wav",
+          "sha256": "96f87549b6daf651bb6863320789841453c3656264ef90fb6516a0494eb48396",
+          "bytes": 640078,
+          "verified_on_client": true
+        }
+      ],
+      "manifest_path": "/home/isaac/workdir/h3/outputs/omni-sp2-diagnostic-001/bench_20261021T075331Z_6326b080bf75/omni_20261021T075838Z_f1350b1df3a9/manifest.json",
+      "timings": {
+        "server_full_request_s": null,
+        "server_full_request_note": "not exposed by the pinned async API; inference_time_s is reported separately",
+        "client_submit_s": 0.007509371993364766,
+        "client_to_completed_s": 39.094797700003255,
+        "server_reported_inference_s": 38.49709462100873,
+        "server_stage_durations": {
+          "input_preparation_stage": 0.06109188099799212,
+          "conditioning_stage": 1.9185653929889668,
+          "latent_preparation_stage": 0.05396593100158498,
+          "denoising_stage": 33.20271691599919,
+          "video_decoding_stage": 0.9927856959984638,
+          "audio_decoding_stage": 0.03342551499372348,
+          "PostDecodeFrameProcessStage": 0.011162262002471834,
+          "VideoSaveStage": 0.12666424800409004,
+          "AudioMuxStage": 0.0
+        },
+        "client_to_media_s": 39.10201878199587,
+        "local_validation_s": 0.06046757800504565,
+        "client_to_validated_s": 39.162610825995216
+      },
+      "server_model": "fasth3-omni-qad-sp2-dd7918d0cdb3",
+      "media": {
+        "valid": true,
+        "width": 832,
+        "height": 480,
+        "frames": 124,
+        "fps": 24.0,
+        "video_duration_s": 5.166667,
+        "audio_duration_s": 5.166656,
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "bytes": 882288,
+        "sha256": "012863ba6c7ed81716bd4a669a1edc23acd47b42e5f864578a50f9ec3539b582"
+      }
+    },
+    {
+      "name": "S1_image_362",
+      "outcome": "succeeded",
+      "attempted": true,
+      "frames": 362,
+      "seed": 2362,
+      "client_to_media_s": 75.19663094100542,
+      "not_run_reason": null,
+      "request": {
+        "task": "ref2va",
+        "prompt": "Keep the character and lighting from the reference image. The man slowly raises his eyes, takes a breath, and looks to his left. The camera holds a steady close-up. Natural quiet ambient sound.",
+        "seed": 2362,
+        "width": 832,
+        "height": 480,
+        "num_frames": 362,
+        "fps": 24,
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0,
+        "num_outputs_per_prompt": 1,
+        "image_reference": [
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          }
+        ]
+      },
+      "references": [
+        {
+          "index": 0,
+          "type": "image",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png",
+          "sha256": "c88707b957522299f98bcbf953aba88d5403f2e5348bc24152b26ba978e3e96f",
+          "bytes": 529358,
+          "verified_on_client": true
+        }
+      ],
+      "manifest_path": "/home/isaac/workdir/h3/outputs/omni-sp2-diagnostic-001/bench_20261021T075331Z_6326b080bf75/omni_20261021T075918Z_4b3147b7d066/manifest.json",
+      "timings": {
+        "server_full_request_s": null,
+        "server_full_request_note": "not exposed by the pinned async API; inference_time_s is reported separately",
+        "client_submit_s": 0.00711977000173647,
+        "client_to_completed_s": 75.18861983899842,
+        "server_reported_inference_s": 73.8045399679977,
+        "server_stage_durations": {
+          "input_preparation_stage": 0.05536579398903996,
+          "conditioning_stage": 0.020826175008551218,
+          "latent_preparation_stage": 0.033881516006658785,
+          "denoising_stage": 67.562890435991,
+          "video_decoding_stage": 3.129237347995513,
+          "audio_decoding_stage": 0.11243947999901138,
+          "PostDecodeFrameProcessStage": 0.04221886600134894,
+          "VideoSaveStage": 0.334052177000558,
+          "AudioMuxStage": 0.0
+        },
+        "client_to_media_s": 75.19663094100542,
+        "local_validation_s": 0.13270403500064276,
+        "client_to_validated_s": 75.32944107400544
+      },
+      "server_model": "fasth3-omni-qad-sp2-dd7918d0cdb3",
+      "media": {
+        "valid": true,
+        "width": 832,
+        "height": 480,
+        "frames": 362,
+        "fps": 24.0,
+        "video_duration_s": 15.083333,
+        "audio_duration_s": 15.083344,
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "bytes": 2963188,
+        "sha256": "5f55cf4a5981e0435c832f779fefe387cc44b0d28a7f70c3cda999ab985ee89a"
+      }
+    },
+    {
+      "name": "S2_multi_image_362",
+      "outcome": "failed",
+      "attempted": true,
+      "frames": 362,
+      "seed": 2363,
+      "client_to_media_s": null,
+      "not_run_reason": null,
+      "request": {
+        "task": "ref2va",
+        "prompt": "Keep the man from the first image and the laboratory setting from the second and third images. He turns toward the workbench and carefully places an object on the table. Preserve the reference appearances and natural lighting. Quiet room ambience.",
+        "seed": 2363,
+        "width": 832,
+        "height": 480,
+        "num_frames": 362,
+        "fps": 24,
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0,
+        "num_outputs_per_prompt": 1,
+        "image_reference": [
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/tos_first.png"
+          },
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png"
+          },
+          {
+            "image_url": "/home/isaac/workdir/h3/inputs/tos/reference-image-240.png"
+          }
+        ]
+      },
+      "references": [
+        {
+          "index": 0,
+          "type": "image",
+          "index_within_type": 1,
+          "source": "/home/isaac/workdir/h3/inputs/tos/tos_first.png",
+          "sha256": "c88707b957522299f98bcbf953aba88d5403f2e5348bc24152b26ba978e3e96f",
+          "bytes": 529358,
+          "verified_on_client": true
+        },
+        {
+          "index": 1,
+          "type": "image",
+          "index_within_type": 2,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-055.png",
+          "sha256": "4934413a73b83233f744e1425419b5a131cf0140476e593cb9a67d91431bc984",
+          "bytes": 446476,
+          "verified_on_client": true
+        },
+        {
+          "index": 2,
+          "type": "image",
+          "index_within_type": 3,
+          "source": "/home/isaac/workdir/h3/inputs/tos/reference-image-240.png",
+          "sha256": "72ee91e10076781ef0777ef651b448f7d5c1e525b9d89928f0c6b9b35c5d3308",
+          "bytes": 410882,
+          "verified_on_client": true
+        }
+      ],
+      "manifest_path": "/home/isaac/workdir/h3/outputs/omni-sp2-diagnostic-001/bench_20261021T075331Z_6326b080bf75/omni_20261021T080033Z_60e1f404f162/manifest.json",
+      "timings": {
+        "server_full_request_s": null,
+        "server_full_request_note": "not exposed by the pinned async API; inference_time_s is reported separately",
+        "client_submit_s": 0.023379449994536117,
+        "client_elapsed_s": 6.033692540993798
+      },
+      "server_model": null,
+      "error_summary": "CUDA OOM before first forward in compiled QKV conversion, shape(3,86142,28,128) BF16; request1.73GiB/free725.88MiB/allocated25.18GiB/reserved-unallocated3.89GiB",
+      "full_error_sha256": "cf071c372fbfe80d12f3ec1b47d99e9cc6856463f3d396d0c62eda0cf1530d3a"
+    },
+    {
+      "name": "S3_image_audio_362",
+      "outcome": "not_run",
+      "attempted": false,
+      "frames": 362,
+      "seed": 2364,
+      "client_to_media_s": null,
+      "not_run_reason": "fail_fast_after_request"
+    },
+    {
+      "name": "S4_image_video_362",
+      "outcome": "not_run",
+      "attempted": false,
+      "frames": 362,
+      "seed": 2365,
+      "client_to_media_s": null,
+      "not_run_reason": "fail_fast_after_request"
+    }
+  ],
+  "rank_forward_evidence": [
+    {
+      "pid": 1505982,
+      "rank": 0,
+      "log_sha256": "9726b1b5bc29fd486e0aeafafb96b07a9bdd5e370b64136b7703075c1a3094df",
+      "segments": [
+        {
+          "completed_forwards": 8,
+          "stage_completed": true,
+          "stage_ms": [
+            {
+              "qkv_proj": 13.4,
+              "attention": 56.7,
+              "out_proj": 168.0,
+              "qkv_proj_rope": 577.0,
+              "qkv_pack": 620.0,
+              "qkv_all_to_all": 2380.8,
+              "qkv_unpack_tile": 403.4,
+              "select_mask": 137.3,
+              "prefix_attention": 5675.0,
+              "fp4_attention": 7536.8,
+              "out_pack": 1125.1,
+              "out_all_to_all": 850.6,
+              "out_unpack": 111.5,
+              "gate_compress": 34.6,
+              "gate_all_gather": 315.1,
+              "gate_apply": 306.3,
+              "feed_forward": 1006.4,
+              "block_total": 15988.1
+            },
+            {
+              "qkv_proj_rope": 532.9,
+              "qkv_pack": 76.5,
+              "qkv_all_to_all": 1495.0,
+              "qkv_unpack_tile": 200.7,
+              "select_mask": 133.1,
+              "prefix_attention": 5262.1,
+              "fp4_attention": 7131.3,
+              "out_pack": 28.9,
+              "out_all_to_all": 493.0,
+              "out_unpack": 26.0,
+              "gate_compress": 28.1,
+              "gate_all_gather": 21.2,
+              "gate_apply": 199.9,
+              "out_proj": 164.3,
+              "feed_forward": 995.0,
+              "block_total": 11637.1
+            },
+            {
+              "qkv_proj_rope": 536.0,
+              "qkv_pack": 76.5,
+              "qkv_all_to_all": 1488.3,
+              "qkv_unpack_tile": 200.8,
+              "select_mask": 133.1,
+              "prefix_attention": 5274.4,
+              "fp4_attention": 7151.5,
+              "out_pack": 28.8,
+              "out_all_to_all": 493.8,
+              "out_unpack": 26.0,
+              "gate_compress": 28.1,
+              "gate_all_gather": 21.4,
+              "gate_apply": 200.8,
+              "out_proj": 164.5,
+              "feed_forward": 999.4,
+              "block_total": 11660.0
+            },
+            {
+              "qkv_proj_rope": 536.9,
+              "qkv_pack": 76.6,
+              "qkv_all_to_all": 1487.9,
+              "qkv_unpack_tile": 200.7,
+              "select_mask": 132.9,
+              "prefix_attention": 5281.1,
+              "fp4_attention": 7164.5,
+              "out_pack": 28.9,
+              "out_all_to_all": 493.3,
+              "out_unpack": 26.1,
+              "gate_compress": 28.2,
+              "gate_all_gather": 21.2,
+              "gate_apply": 202.4,
+              "out_proj": 165.9,
+              "feed_forward": 1003.1,
+              "block_total": 11679.7
+            },
+            {
+              "qkv_proj_rope": 540.4,
+              "qkv_pack": 76.5,
+              "qkv_all_to_all": 1486.6,
+              "qkv_unpack_tile": 200.8,
+              "select_mask": 133.7,
+              "prefix_attention": 5287.6,
+              "fp4_attention": 7176.3,
+              "out_pack": 28.9,
+              "out_all_to_all": 493.5,
+              "out_unpack": 26.0,
+              "gate_compress": 28.1,
+              "gate_all_gather": 21.3,
+              "gate_apply": 203.4,
+              "out_proj": 166.2,
+              "feed_forward": 1008.2,
+              "block_total": 11701.3
+            },
+            {
+              "qkv_proj_rope": 543.3,
+              "qkv_pack": 76.5,
+              "qkv_all_to_all": 1488.9,
+              "qkv_unpack_tile": 200.6,
+              "select_mask": 133.2,
+              "prefix_attention": 5285.8,
+              "fp4_attention": 7180.9,
+              "out_pack": 28.9,
+              "out_all_to_all": 493.8,
+              "out_unpack": 26.0,
+              "gate_compress": 28.2,
+              "gate_all_gather": 21.3,
+              "gate_apply": 205.2,
+              "out_proj": 167.6,
+              "feed_forward": 1011.6,
+              "block_total": 11717.2
+            },
+            {
+              "qkv_proj_rope": 546.1,
+              "qkv_pack": 76.5,
+              "qkv_all_to_all": 1482.7,
+              "qkv_unpack_tile": 200.7,
+              "select_mask": 133.8,
+              "prefix_attention": 5292.7,
+              "fp4_attention": 7193.0,
+              "out_pack": 28.9,
+              "out_all_to_all": 493.5,
+              "out_unpack": 26.0,
+              "gate_compress": 28.1,
+              "gate_all_gather": 21.3,
+              "gate_apply": 205.6,
+              "out_proj": 168.1,
+              "feed_forward": 1017.0,
+              "block_total": 11732.5
+            },
+            {
+              "qkv_proj_rope": 549.7,
+              "qkv_pack": 76.5,
+              "qkv_all_to_all": 1486.7,
+              "qkv_unpack_tile": 200.9,
+              "select_mask": 133.5,
+              "prefix_attention": 5289.3,
+              "fp4_attention": 7199.4,
+              "out_pack": 28.9,
+              "out_all_to_all": 495.1,
+              "out_unpack": 26.0,
+              "gate_compress": 28.2,
+              "gate_all_gather": 21.1,
+              "gate_apply": 207.3,
+              "out_proj": 169.1,
+              "feed_forward": 1022.3,
+              "block_total": 11755.8
+            }
+          ]
+        },
+        {
+          "completed_forwards": 8,
+          "stage_completed": true,
+          "stage_ms": [
+            {
+              "qkv_proj": 7.7,
+              "attention": 771.4,
+              "out_proj": 56.2,
+              "qkv_proj_rope": 196.3,
+              "qkv_pack": 456.9,
+              "qkv_all_to_all": 607.0,
+              "qkv_unpack_tile": 455.1,
+              "select_mask": 33.9,
+              "prefix_attention": 1555.9,
+              "fp4_attention": 1958.3,
+              "out_pack": 320.1,
+              "out_all_to_all": 198.0,
+              "out_unpack": 389.9,
+              "gate_compress": 10.0,
+              "gate_all_gather": 6.9,
+              "gate_apply": 462.0,
+              "feed_forward": 354.2,
+              "block_total": 5547.8
+            },
+            {
+              "qkv_proj_rope": 196.0,
+              "qkv_pack": 31.1,
+              "qkv_all_to_all": 596.7,
+              "qkv_unpack_tile": 80.9,
+              "select_mask": 32.9,
+              "prefix_attention": 1557.2,
+              "fp4_attention": 1960.6,
+              "out_pack": 12.2,
+              "out_all_to_all": 198.3,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 70.9,
+              "out_proj": 53.9,
+              "feed_forward": 357.1,
+              "block_total": 3662.7
+            },
+            {
+              "qkv_proj_rope": 196.2,
+              "qkv_pack": 31.2,
+              "qkv_all_to_all": 597.6,
+              "qkv_unpack_tile": 80.8,
+              "select_mask": 33.5,
+              "prefix_attention": 1553.6,
+              "fp4_attention": 1957.2,
+              "out_pack": 12.2,
+              "out_all_to_all": 197.4,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 71.0,
+              "out_proj": 54.0,
+              "feed_forward": 357.7,
+              "block_total": 3660.8
+            },
+            {
+              "qkv_proj_rope": 196.5,
+              "qkv_pack": 31.1,
+              "qkv_all_to_all": 598.8,
+              "qkv_unpack_tile": 80.8,
+              "select_mask": 33.1,
+              "prefix_attention": 1554.5,
+              "fp4_attention": 1958.6,
+              "out_pack": 12.2,
+              "out_all_to_all": 198.1,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 71.1,
+              "out_proj": 54.1,
+              "feed_forward": 358.0,
+              "block_total": 3664.8
+            },
+            {
+              "qkv_proj_rope": 196.8,
+              "qkv_pack": 31.2,
+              "qkv_all_to_all": 597.4,
+              "qkv_unpack_tile": 80.8,
+              "select_mask": 32.9,
+              "prefix_attention": 1554.5,
+              "fp4_attention": 1958.5,
+              "out_pack": 12.2,
+              "out_all_to_all": 197.4,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 71.0,
+              "out_proj": 54.0,
+              "feed_forward": 358.8,
+              "block_total": 3663.2
+            },
+            {
+              "qkv_proj_rope": 196.9,
+              "qkv_pack": 31.2,
+              "qkv_all_to_all": 597.5,
+              "qkv_unpack_tile": 80.8,
+              "select_mask": 32.8,
+              "prefix_attention": 1554.3,
+              "fp4_attention": 1958.5,
+              "out_pack": 12.2,
+              "out_all_to_all": 197.2,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 71.1,
+              "out_proj": 54.1,
+              "feed_forward": 358.5,
+              "block_total": 3662.8
+            },
+            {
+              "qkv_proj_rope": 196.8,
+              "qkv_pack": 31.2,
+              "qkv_all_to_all": 598.0,
+              "qkv_unpack_tile": 80.9,
+              "select_mask": 32.7,
+              "prefix_attention": 1554.7,
+              "fp4_attention": 1959.0,
+              "out_pack": 12.2,
+              "out_all_to_all": 197.9,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 71.2,
+              "out_proj": 54.2,
+              "feed_forward": 359.3,
+              "block_total": 3665.5
+            },
+            {
+              "qkv_proj_rope": 197.0,
+              "qkv_pack": 31.2,
+              "qkv_all_to_all": 597.8,
+              "qkv_unpack_tile": 80.9,
+              "select_mask": 33.5,
+              "prefix_attention": 1555.4,
+              "fp4_attention": 1960.3,
+              "out_pack": 12.2,
+              "out_all_to_all": 198.4,
+              "out_unpack": 10.6,
+              "gate_compress": 9.9,
+              "gate_all_gather": 6.9,
+              "gate_apply": 71.2,
+              "out_proj": 54.2,
+              "feed_forward": 359.3,
+              "block_total": 3668.2
+            }
+          ]
+        },
+        {
+          "completed_forwards": 8,
+          "stage_completed": true,
+          "stage_ms": [
+            {
+              "qkv_proj": 22.3,
+              "attention": 762.2,
+              "out_proj": 139.0,
+              "qkv_proj_rope": 440.5,
+              "qkv_pack": 484.4,
+              "qkv_all_to_all": 1300.0,
+              "qkv_unpack_tile": 515.8,
+              "select_mask": 65.9,
+              "prefix_attention": 8853.7,
+              "fp4_attention": 9880.9,
+              "out_pack": 183.6,
+              "out_all_to_all": 400.2,
+              "out_unpack": 399.4,
+              "gate_compress": 19.4,
+              "gate_all_gather": 11.3,
+              "gate_apply": 569.8,
+              "feed_forward": 816.0,
+              "block_total": 15307.2
+            },
+            {
+              "qkv_proj_rope": 443.5,
+              "qkv_pack": 61.0,
+              "qkv_all_to_all": 1183.1,
+              "qkv_unpack_tile": 159.2,
+              "select_mask": 66.4,
+              "prefix_attention": 8882.0,
+              "fp4_attention": 9914.0,
+              "out_pack": 23.1,
+              "out_all_to_all": 394.1,
+              "out_unpack": 20.6,
+              "gate_compress": 19.4,
+              "gate_all_gather": 11.4,
+              "gate_apply": 163.8,
+              "out_proj": 133.3,
+              "feed_forward": 823.9,
+              "block_total": 13505.2
+            },
+            {
+              "qkv_proj_rope": 438.8,
+              "qkv_pack": 60.8,
+              "qkv_all_to_all": 1177.4,
+              "qkv_unpack_tile": 159.2,
+              "select_mask": 66.3,
+              "prefix_attention": 8949.5,
+              "fp4_attention": 9987.6,
+              "out_pack": 23.1,
+              "out_all_to_all": 395.1,
+              "out_unpack": 20.6,
+              "gate_compress": 19.5,
+              "gate_all_gather": 11.4,
+              "gate_apply": 161.4,
+              "out_proj": 130.8,
+              "feed_forward": 811.5,
+              "block_total": 13551.5
+            },
+            {
+              "qkv_proj_rope": 450.0,
+              "qkv_pack": 61.3,
+              "qkv_all_to_all": 1181.7,
+              "qkv_unpack_tile": 159.2,
+              "select_mask": 66.5,
+              "prefix_attention": 9035.1,
+              "fp4_attention": 10101.9,
+              "out_pack": 23.2,
+              "out_all_to_all": 395.2,
+              "out_unpack": 20.5,
+              "gate_compress": 19.5,
+              "gate_all_gather": 11.4,
+              "gate_apply": 166.3,
+              "out_proj": 135.9,
+              "feed_forward": 834.8,
+              "block_total": 13715.6
+            },
+            {
+              "qkv_proj_rope": 451.2,
+              "qkv_pack": 60.9,
+              "qkv_all_to_all": 1177.1,
+              "qkv_unpack_tile": 159.4,
+              "select_mask": 66.4,
+              "prefix_attention": 9009.0,
+              "fp4_attention": 10087.7,
+              "out_pack": 23.2,
+              "out_all_to_all": 394.6,
+              "out_unpack": 20.6,
+              "gate_compress": 19.5,
+              "gate_all_gather": 11.4,
+              "gate_apply": 166.6,
+              "out_proj": 135.3,
+              "feed_forward": 834.3,
+              "block_total": 13696.3
+            },
+            {
+              "qkv_proj_rope": 447.0,
+              "qkv_pack": 61.0,
+              "qkv_all_to_all": 1178.9,
+              "qkv_unpack_tile": 159.2,
+              "select_mask": 66.2,
+              "prefix_attention": 9074.5,
+              "fp4_attention": 10118.4,
+              "out_pack": 23.1,
+              "out_all_to_all": 393.3,
+              "out_unpack": 20.5,
+              "gate_compress": 19.4,
+              "gate_all_gather": 11.5,
+              "gate_apply": 163.5,
+              "out_proj": 133.4,
+              "feed_forward": 825.4,
+              "block_total": 13709.2
+            },
+            {
+              "qkv_proj_rope": 452.4,
+              "qkv_pack": 61.1,
+              "qkv_all_to_all": 1177.1,
+              "qkv_unpack_tile": 159.3,
+              "select_mask": 65.9,
+              "prefix_attention": 9053.5,
+              "fp4_attention": 10105.8,
+              "out_pack": 23.2,
+              "out_all_to_all": 392.5,
+              "out_unpack": 20.6,
+              "gate_compress": 19.5,
+              "gate_all_gather": 11.4,
+              "gate_apply": 167.0,
+              "out_proj": 135.8,
+              "feed_forward": 834.8,
+              "block_total": 13714.8
+            },
+            {
+              "qkv_proj_rope": 461.9,
+              "qkv_pack": 61.3,
+              "qkv_all_to_all": 1179.1,
+              "qkv_unpack_tile": 159.3,
+              "select_mask": 66.2,
+              "prefix_attention": 8985.0,
+              "fp4_attention": 10050.2,
+              "out_pack": 23.2,
+              "out_all_to_all": 393.6,
+              "out_unpack": 20.5,
+              "gate_compress": 19.4,
+              "gate_all_gather": 11.5,
+              "gate_apply": 168.8,
+              "out_proj": 138.2,
+              "feed_forward": 847.0,
+              "block_total": 13688.8
+            }
+          ]
+        },
+        {
+          "completed_forwards": 8,
+          "stage_completed": true,
+          "stage_ms": [
+            {
+              "qkv_proj": 7.7,
+              "attention": 776.8,
+              "out_proj": 57.7,
+              "qkv_proj_rope": 199.0,
+              "qkv_pack": 479.1,
+              "qkv_all_to_all": 605.1,
+              "qkv_unpack_tile": 465.7,
+              "select_mask": 35.1,
+              "prefix_attention": 1654.6,
+              "fp4_attention": 2070.0,
+              "out_pack": 312.7,
+              "out_all_to_all": 200.1,
+              "out_unpack": 395.9,
+              "gate_compress": 10.2,
+              "gate_all_gather": 8.0,
+              "gate_apply": 465.5,
+              "feed_forward": 366.3,
+              "block_total": 5713.4
+            },
+            {
+              "qkv_proj_rope": 199.1,
+              "qkv_pack": 31.6,
+              "qkv_all_to_all": 605.6,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 33.9,
+              "prefix_attention": 1653.5,
+              "fp4_attention": 2069.5,
+              "out_pack": 12.2,
+              "out_all_to_all": 200.2,
+              "out_unpack": 10.8,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.0,
+              "gate_apply": 72.9,
+              "out_proj": 54.7,
+              "feed_forward": 366.9,
+              "block_total": 3801.9
+            },
+            {
+              "qkv_proj_rope": 200.2,
+              "qkv_pack": 31.6,
+              "qkv_all_to_all": 604.6,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 33.7,
+              "prefix_attention": 1651.7,
+              "fp4_attention": 2067.6,
+              "out_pack": 12.2,
+              "out_all_to_all": 200.6,
+              "out_unpack": 10.7,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.1,
+              "gate_apply": 72.8,
+              "out_proj": 54.8,
+              "feed_forward": 367.1,
+              "block_total": 3800.4
+            },
+            {
+              "qkv_proj_rope": 199.4,
+              "qkv_pack": 31.7,
+              "qkv_all_to_all": 606.0,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 33.5,
+              "prefix_attention": 1651.6,
+              "fp4_attention": 2067.9,
+              "out_pack": 12.2,
+              "out_all_to_all": 200.9,
+              "out_unpack": 10.8,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.1,
+              "gate_apply": 73.0,
+              "out_proj": 54.7,
+              "feed_forward": 367.3,
+              "block_total": 3801.8
+            },
+            {
+              "qkv_proj_rope": 199.4,
+              "qkv_pack": 31.6,
+              "qkv_all_to_all": 606.5,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 33.7,
+              "prefix_attention": 1652.9,
+              "fp4_attention": 2069.2,
+              "out_pack": 12.2,
+              "out_all_to_all": 200.5,
+              "out_unpack": 10.7,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.0,
+              "gate_apply": 73.0,
+              "out_proj": 54.9,
+              "feed_forward": 367.5,
+              "block_total": 3803.4
+            },
+            {
+              "qkv_proj_rope": 199.5,
+              "qkv_pack": 31.7,
+              "qkv_all_to_all": 605.8,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 33.9,
+              "prefix_attention": 1650.4,
+              "fp4_attention": 2066.8,
+              "out_pack": 12.3,
+              "out_all_to_all": 201.0,
+              "out_unpack": 10.8,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.1,
+              "gate_apply": 73.1,
+              "out_proj": 54.8,
+              "feed_forward": 368.1,
+              "block_total": 3802.2
+            },
+            {
+              "qkv_proj_rope": 199.6,
+              "qkv_pack": 31.6,
+              "qkv_all_to_all": 606.7,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 33.4,
+              "prefix_attention": 1652.9,
+              "fp4_attention": 2069.6,
+              "out_pack": 12.2,
+              "out_all_to_all": 200.1,
+              "out_unpack": 10.7,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.1,
+              "gate_apply": 73.2,
+              "out_proj": 54.9,
+              "feed_forward": 368.1,
+              "block_total": 3804.6
+            },
+            {
+              "qkv_proj_rope": 199.9,
+              "qkv_pack": 31.7,
+              "qkv_all_to_all": 605.4,
+              "qkv_unpack_tile": 81.9,
+              "select_mask": 34.2,
+              "prefix_attention": 1651.6,
+              "fp4_attention": 2068.4,
+              "out_pack": 12.2,
+              "out_all_to_all": 200.6,
+              "out_unpack": 10.7,
+              "gate_compress": 10.0,
+              "gate_all_gather": 7.1,
+              "gate_apply": 73.0,
+              "out_proj": 55.0,
+              "feed_forward": 368.5,
+              "block_total": 3803.9
+            }
+          ]
+        },
+        {
+          "completed_forwards": 8,
+          "stage_completed": true,
+          "stage_ms": [
+            {
+              "qkv_proj": 7.7,
+              "attention": 782.9,
+              "out_proj": 125.4,
+              "qkv_proj_rope": 412.3,
+              "qkv_pack": 487.2,
+              "qkv_all_to_all": 1175.2,
+              "qkv_unpack_tile": 1060.5,
+              "select_mask": 87.2,
+              "prefix_attention": 3188.7,
+              "fp4_attention": 4443.1,
+              "out_pack": 259.4,
+              "out_all_to_all": 393.7,
+              "out_unpack": 738.9,
+              "gate_compress": 21.7,
+              "gate_all_gather": 13.1,
+              "gate_apply": 550.1,
+              "feed_forward": 778.4,
+              "block_total": 10631.2
+            },
+            {
+              "qkv_proj_rope": 421.5,
+              "qkv_pack": 60.5,
+              "qkv_all_to_all": 1170.4,
+              "qkv_unpack_tile": 159.5,
+              "select_mask": 87.3,
+              "prefix_attention": 3188.6,
+              "fp4_attention": 4455.6,
+              "out_pack": 23.1,
+              "out_all_to_all": 390.1,
+              "out_unpack": 20.5,
+              "gate_compress": 21.8,
+              "gate_all_gather": 12.9,
+              "gate_apply": 157.5,
+              "out_proj": 125.9,
+              "feed_forward": 795.0,
+              "block_total": 7989.2
+            },
+            {
+              "qkv_proj_rope": 418.9,
+              "qkv_pack": 60.5,
+              "qkv_all_to_all": 1170.6,
+              "qkv_unpack_tile": 159.5,
+              "select_mask": 88.2,
+              "prefix_attention": 3185.0,
+              "fp4_attention": 4478.3,
+              "out_pack": 23.2,
+              "out_all_to_all": 392.7,
+              "out_unpack": 20.5,
+              "gate_compress": 22.1,
+              "gate_all_gather": 12.8,
+              "gate_apply": 156.8,
+              "out_proj": 125.2,
+              "feed_forward": 789.5,
+              "block_total": 8006.2
+            },
+            {
+              "qkv_proj_rope": 418.1,
+              "qkv_pack": 60.5,
+              "qkv_all_to_all": 1169.8,
+              "qkv_unpack_tile": 159.3,
+              "select_mask": 87.0,
+              "prefix_attention": 3181.7,
+              "fp4_attention": 4465.2,
+              "out_pack": 23.2,
+              "out_all_to_all": 392.7,
+              "out_unpack": 20.5,
+              "gate_compress": 21.8,
+              "gate_all_gather": 12.7,
+              "gate_apply": 156.4,
+              "out_proj": 125.1,
+              "feed_forward": 788.4,
+              "block_total": 7988.2
+            },
+            {
+              "qkv_proj_rope": 414.7,
+              "qkv_pack": 60.5,
+              "qkv_all_to_all": 1174.3,
+              "qkv_unpack_tile": 159.5,
+              "select_mask": 88.5,
+              "prefix_attention": 3179.1,
+              "fp4_attention": 4461.8,
+              "out_pack": 23.2,
+              "out_all_to_all": 395.2,
+              "out_unpack": 20.6,
+              "gate_compress": 22.1,
+              "gate_all_gather": 12.7,
+              "gate_apply": 156.9,
+              "out_proj": 123.7,
+              "feed_forward": 783.3,
+              "block_total": 7984.6
+            },
+            {
+              "qkv_proj_rope": 416.9,
+              "qkv_pack": 60.5,
+              "qkv_all_to_all": 1170.5,
+              "qkv_unpack_tile": 159.4,
+              "select_mask": 87.3,
+              "prefix_attention": 3181.8,
+              "fp4_attention": 4472.0,
+              "out_pack": 23.2,
+              "out_all_to_all": 393.6,
+              "out_unpack": 20.5,
+              "gate_compress": 22.0,
+              "gate_all_gather": 12.6,
+              "gate_apply": 156.1,
+              "out_proj": 124.6,
+              "feed_forward": 787.3,
+              "block_total": 7994.0
+            },
+            {
+              "qkv_proj_rope": 415.3,
+              "qkv_pack": 60.6,
+              "qkv_all_to_all": 1171.1,
+              "qkv_unpack_tile": 159.4,
+              "select_mask": 88.0,
+              "prefix_attention": 3180.5,
+              "fp4_attention": 4468.0,
+              "out_pack": 23.2,
+              "out_all_to_all": 393.1,
+              "out_unpack": 20.5,
+              "gate_compress": 22.0,
+              "gate_all_gather": 12.7,
+              "gate_apply": 155.9,
+              "out_proj": 124.7,
+              "feed_forward": 783.2,
+              "block_total": 7985.0
+            },
+            {
+              "qkv_proj_rope": 421.6,
+              "qkv_pack": 60.5,
+              "qkv_all_to_all": 1172.1,
+              "qkv_unpack_tile": 159.1,
+              "select_mask": 86.9,
+              "prefix_attention": 3231.7,
+              "fp4_attention": 4539.7,
+              "out_pack": 23.2,
+              "out_all_to_all": 392.4,
+              "out_unpack": 20.5,
+              "gate_compress": 21.9,
+              "gate_all_gather": 12.7,
+              "gate_apply": 157.4,
+              "out_proj": 125.3,
+              "feed_forward": 789.2,
+              "block_total": 8070.1
+            }
+          ]
+        },
+        {
+          "completed_forwards": 0,
+          "stage_completed": false,
+          "stage_ms": []
+        }
+      ],
+      "note": "H3_STAGE_MS emits rank0 only; rank1 count0 does not imply no execution"
+    },
+    {
+      "pid": 1505981,
+      "rank": 1,
+      "log_sha256": "81c65dbc61b59fa6225aa96515d99e6ceba8b3cfa452147c181f4896fe875040",
+      "segments": [
+        {
+          "completed_forwards": 0,
+          "stage_completed": true,
+          "stage_ms": []
+        },
+        {
+          "completed_forwards": 0,
+          "stage_completed": true,
+          "stage_ms": []
+        },
+        {
+          "completed_forwards": 0,
+          "stage_completed": true,
+          "stage_ms": []
+        },
+        {
+          "completed_forwards": 0,
+          "stage_completed": true,
+          "stage_ms": []
+        },
+        {
+          "completed_forwards": 0,
+          "stage_completed": true,
+          "stage_ms": []
+        },
+        {
+          "completed_forwards": 0,
+          "stage_completed": false,
+          "stage_ms": []
+        }
+      ],
+      "note": "H3_STAGE_MS emits rank0 only; rank1 count0 does not imply no execution"
+    }
+  ],
+  "resources": {
+    "samples": 894,
+    "gpu_sampled_peak_mib": {
+      "0": 31807.0,
+      "1": 31758.0
+    },
+    "host_min_available_bytes": 32099041280,
+    "sampling_errors": 0,
+    "scope": "includes failed startup, restart, all diagnostic requests and shutdown; whole-device/system sampled lower-bound peaks, not allocator"
+  },
+  "quality": "human review pending; no pixels opened"
+}
