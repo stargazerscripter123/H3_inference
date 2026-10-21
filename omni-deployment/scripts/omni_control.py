@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from omni_reference_patch import inspect_patch
+from omni_source_stack import deployment_knobs, source_identity, validate_trial_scope
 
 HERE = Path(__file__).resolve().parent
 PIN = "cdda1b7535fe32699335e39db82c1d4db21ceb88"
@@ -152,6 +152,12 @@ def settings(profile: str) -> tuple[dict, dict, dict]:
              "python": str(absolute(os.environ.get("OMNI_PYTHON", str(root / "envs/omni/bin/python")), "OMNI_PYTHON", follow_symlinks=False)),
              "source": str(absolute(os.environ.get("OMNI_FASTVIDEO_SRC", str(root / "src/FastVideo")), "OMNI_FASTVIDEO_SRC"))}
     env.update(toolchain_environment(root, Path(paths["python"])))
+    env.update(deployment_knobs(os.environ))
+    if env["OMNI_SOURCE_PATCH_STACK"] == "reference-cache":
+        raw_source = Path(os.environ.get("OMNI_FASTVIDEO_SRC", str(root / "src/FastVideo")))
+        if raw_source != raw_source.resolve():
+            raise ValueError("Cache source aliases are forbidden")
+        validate_trial_scope(config, env)
     return config, env, paths
 
 
@@ -272,8 +278,8 @@ def start(profile: str, run: Path) -> dict:
     identity = {"config": config, "env": env, "paths": paths, "pin": PIN,
                 "assets": asset_identity(config, env), "launcher_sha256": sha256(HERE / "omni_service.py"),
                 "health_adapter_sha256": sha256(HERE / "omni_ray_health.py"),
-                "reference_patch": inspect_patch(Path(paths["source"]), required=bool(
-                    config["generator"]["pipeline"]["experimental"].get("h3_reference_image_resize_policy", "native") != "native"))}
+                "source_validator_sha256": sha256(HERE / "omni_source_stack.py"),
+                **source_identity(Path(paths["source"]), config, env)}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     name = f"fasth3-omni-qad-{profile}-{digest[:12]}"
     config["server"]["served_model_name"] = name

@@ -163,7 +163,7 @@ class ToolchainSettingsTest(unittest.TestCase):
                             patch.dict(os.environ, {**self.asset_env(root), "OMNI_NVFP4_MM_BACKEND": backend,
                                 "OMNI_STAGE_LOGGING": stage_logging, "FASTVIDEO_NVFP4_MM_ROW_SPLIT": "table"}, clear=True), \
                             patch.object(control, "asset_identity", return_value={"verified": True}), \
-                            patch.object(control, "inspect_patch", return_value={"state": "native"}), \
+                            patch.object(control, "source_identity", return_value={"reference_patch": {"state": "native"}}), \
                             patch.object(control, "sha256", return_value="a" * 64), \
                             patch.object(control, "read_state", return_value=None), \
                             patch.object(control.socket, "socket"), patch.object(control, "validate"), \
@@ -254,7 +254,7 @@ class ToolchainSettingsTest(unittest.TestCase):
                 with self.subTest(vae=vae, expandable=expandable), \
                         patch.dict(os.environ, shell_env, clear=True), \
                         patch.object(control, "asset_identity", return_value={"verified": True}), \
-                        patch.object(control, "inspect_patch", return_value={"state": "native"}), \
+                        patch.object(control, "source_identity", return_value={"reference_patch": {"state": "native"}}), \
                         patch.object(control, "sha256", return_value="a" * 64), \
                         patch.object(control, "read_state", return_value=None), \
                         patch.object(control.socket, "socket"), patch.object(control, "validate"), \

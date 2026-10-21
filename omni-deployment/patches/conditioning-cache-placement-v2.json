@@ -1,0 +1,31 @@
+{
+  "default_enabled": false,
+  "files": {
+    "docs/contributing/env_vars.md": {
+      "after_sha256": "977011c80ac57ead8d6e1a233217062be51bfca26d2641f2009371c76d747f5c",
+      "before_sha256": "3582565b14ab337abe1c192f1f9b02b8c1c102159f63cb551fd081f5bbe8d956"
+    },
+    "fastvideo/envs.py": {
+      "after_sha256": "dfbd4ea5552b03eefdbbae4071401817310720b7fd245e9d8483d19e7be1e5e8",
+      "before_sha256": "458be8a187e5114d676dd109a9c056f5305caf1c49d3025298a7e118b479b318"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/memo.py": {
+      "after_sha256": "0e88082f65efc33c8660e1ce1207638131faec4552ddc2d6e3b617e5206a7f4a",
+      "before_sha256": "3d4ba9a360a8a08dc45bdef657ae0bd497bfe92bcdf627470edefec0d98a93dc"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/minimax_h3_pipeline.py": {
+      "after_sha256": "bba1dcb7383ce979db5f35fceeed23a3b9b16156e1e42894329bd9372fcc4cd3",
+      "before_sha256": "d23a5d96e9aac445bfc0055b594d4f7f0f6860354636e4cd9e90ac9c7bd72bad"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py": {
+      "after_sha256": "a42aa397c393ea30a2676b8c2f7a078635c34a597991833539fd7be7b1e097ea",
+      "before_sha256": "33d4deabb4e79c65e65dc7393b97949584437fd57b715101f36fea1ac3c60b1a"
+    }
+  },
+  "gpu_validated": false,
+  "instrumentation": "SP_PROFILE=1 only: actual transformer pre-hook count; structured rank/request events in both modes",
+  "patch_sha256": "e1cb88d9d1009aaefa2cfd6467b96352ecd3bd5f5faad31efe6b756f822b4329",
+  "requires_reference_patch_sha256": "77b08c6f464688b8f2a8d3509ac055412e6f3bcf82409f9bcc08a0bf4de2a054",
+  "schema_version": 1,
+  "upstream_commit": "cdda1b7535fe32699335e39db82c1d4db21ceb88"
+}

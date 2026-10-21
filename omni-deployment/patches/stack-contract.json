@@ -1,0 +1,59 @@
+{
+  "artifacts": {
+    "conditioning-cache-placement-v2.json": "43e08bcb2a2e1b139aded28ba22b2580ae547b37b34aaf97890185b224e95119",
+    "conditioning-cache-placement-v2.patch": "e1cb88d9d1009aaefa2cfd6467b96352ecd3bd5f5faad31efe6b756f822b4329",
+    "reference-image-cap-v1.json": "55a6a4522bb8fda85ac39509ba4a18534b60f25e4c45ce1df45ae695c5f0f0e4",
+    "reference-image-cap-v1.patch": "77b08c6f464688b8f2a8d3509ac055412e6f3bcf82409f9bcc08a0bf4de2a054"
+  },
+  "default_cache_enabled": false,
+  "default_stack": "reference",
+  "files": {
+    "docs/contributing/env_vars.md": {
+      "reference": "3582565b14ab337abe1c192f1f9b02b8c1c102159f63cb551fd081f5bbe8d956",
+      "reference-cache": "977011c80ac57ead8d6e1a233217062be51bfca26d2641f2009371c76d747f5c",
+      "upstream": "3582565b14ab337abe1c192f1f9b02b8c1c102159f63cb551fd081f5bbe8d956"
+    },
+    "fastvideo/configs/pipelines/minimax_h3.py": {
+      "reference": "885e7649838113c144e2155927853ad47aa3979d6212fb14feb6f3a4c0bfc364",
+      "reference-cache": "885e7649838113c144e2155927853ad47aa3979d6212fb14feb6f3a4c0bfc364",
+      "upstream": "502433863307d097688f9a198b849a5a0dbefb0a06503776c407faf115d64115"
+    },
+    "fastvideo/envs.py": {
+      "reference": "458be8a187e5114d676dd109a9c056f5305caf1c49d3025298a7e118b479b318",
+      "reference-cache": "dfbd4ea5552b03eefdbbae4071401817310720b7fd245e9d8483d19e7be1e5e8",
+      "upstream": "458be8a187e5114d676dd109a9c056f5305caf1c49d3025298a7e118b479b318"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/memo.py": {
+      "reference": "3d4ba9a360a8a08dc45bdef657ae0bd497bfe92bcdf627470edefec0d98a93dc",
+      "reference-cache": "0e88082f65efc33c8660e1ce1207638131faec4552ddc2d6e3b617e5206a7f4a",
+      "upstream": "3d4ba9a360a8a08dc45bdef657ae0bd497bfe92bcdf627470edefec0d98a93dc"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/minimax_h3_pipeline.py": {
+      "reference": "d23a5d96e9aac445bfc0055b594d4f7f0f6860354636e4cd9e90ac9c7bd72bad",
+      "reference-cache": "bba1dcb7383ce979db5f35fceeed23a3b9b16156e1e42894329bd9372fcc4cd3",
+      "upstream": "d23a5d96e9aac445bfc0055b594d4f7f0f6860354636e4cd9e90ac9c7bd72bad"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/reference.py": {
+      "reference": "2dbd14d68d21849c1f1eb4d15e3dbf393efb6438a7ce35ac12a042230e5d474a",
+      "reference-cache": "2dbd14d68d21849c1f1eb4d15e3dbf393efb6438a7ce35ac12a042230e5d474a",
+      "upstream": "8502e999700dfcd3f812563c848d0fc29084c07e340c53deb655a2c9040eb040"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py": {
+      "reference": "33d4deabb4e79c65e65dc7393b97949584437fd57b715101f36fea1ac3c60b1a",
+      "reference-cache": "a42aa397c393ea30a2676b8c2f7a078635c34a597991833539fd7be7b1e097ea",
+      "upstream": "fa6a45be92056a5f23fa48db8d088fee83aa29f90a89e652954608e13c437d5e"
+    },
+    "fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_input_preparation.py": {
+      "reference": "642c1eb67c08cf927808440023ede3852e002bc3e325d81ff207d00046c8a064",
+      "reference-cache": "642c1eb67c08cf927808440023ede3852e002bc3e325d81ff207d00046c8a064",
+      "upstream": "18b59fb5e6ff49815083cb364dfa519bfd549d52146622ba4820b327ff77da21"
+    }
+  },
+  "schema_version": 1,
+  "states": [
+    "upstream",
+    "reference",
+    "reference-cache"
+  ],
+  "upstream_commit": "cdda1b7535fe32699335e39db82c1d4db21ceb88"
+}

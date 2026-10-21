@@ -1,0 +1,421 @@
+--- a/fastvideo/envs.py
++++ b/fastvideo/envs.py
+@@ -713,6 +713,10 @@
+                                      category="performance",
+                                      doc="Spatial tiles per MiniMax-H3 video VAE decoder call; 1 decodes per "
+                                      "tile.")
++FASTVIDEO_H3_CONDITIONING_CACHE_FASTPATH = EnvBool(
++    False,
++    category="performance",
++    doc="Opt-in discrete sequential Ref2VA conditioning-memo placement fastpath; all SP ranks must hit.")
+ FASTVIDEO_H3_REF2VA_MEMO_ENTRIES = EnvInt(0,
+                                           category="performance",
+                                           doc="Entries in each content-keyed MiniMax-H3 memo of reference encodes "
+--- a/fastvideo/pipelines/basic/minimax_h3/memo.py
++++ b/fastvideo/pipelines/basic/minimax_h3/memo.py
+@@ -66,5 +66,15 @@
+         self._items.move_to_end(key)
+         return _clone(cached)
+ 
++    def get_cached(self, key: Any) -> Any | None:
++        """Clone one entry without executing an encoder; callers own synchronization."""
++        if not self.enabled:
++            return None
++        cached = self._items.get(key)
++        if cached is None:
++            return None
++        self._items.move_to_end(key)
++        return _clone(cached)
++
+     def clear(self) -> None:
+         self._items.clear()
+--- a/fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py
++++ b/fastvideo/pipelines/basic/minimax_h3/stages/minimax_h3_conditioning.py
+@@ -199,6 +199,30 @@
+             image_grid_thw=image_grid_thw,
+         )
+ 
++    def configure_placement_memo_scope(self, scope: tuple) -> None:
++        """A service-owned component/config epoch; never infer identity from filenames."""
++        previous = getattr(self, "_placement_memo_scope", None)
++        if previous is None or any(a is not b
++                                   for a, b in zip(previous[:3], scope[:3], strict=False)) or previous[3:] != scope[3:]:
++            self._ref2va_memo.clear()
++            self._placement_memo_scope = scope
++
++    def _ref2va_memo_key(self, batch, device, image_resize_policy) -> tuple:
++        references = list(batch.references or [])
++        return (str(device), batch.prompt, ("image_resize_policy", image_resize_policy),
++                tuple((reference.media_type, bool(reference.has_audio),
++                       image_key(reference.image) if reference.media_type == "image" else None)
++                      for reference in references))
++
++    @torch.no_grad()
++    def probe_placement_memo(self, batch, device, image_resize_policy):
++        """Reserve a cloned result once; no placement, encoding, or pixel logging."""
++        if not self._ref2va_memo.enabled:
++            return None
++        key = self._ref2va_memo_key(batch, device, image_resize_policy)
++        cached = self._ref2va_memo.get_cached(key)
++        return None if cached is None else (self, cached)
++
+     def _encode_ref2va(self,
+                        batch: ForwardBatch,
+                        device: torch.device,
+@@ -214,10 +238,7 @@
+         has_video = any(reference.media_type == "video" for reference in references)
+         images_ready = all(reference.image is not None for reference in references if reference.media_type == "image")
+         if self._ref2va_memo.enabled and not has_video and images_ready:
+-            key = (str(device), batch.prompt, ("image_resize_policy", image_resize_policy),
+-                   tuple((reference.media_type, bool(reference.has_audio),
+-                          image_key(reference.image) if reference.media_type == "image" else None)
+-                         for reference in references))
++            key = self._ref2va_memo_key(batch, device, image_resize_policy)
+             return self._ref2va_memo.get_or_compute(
+                 key, lambda: self._present_ref2va(batch, references, device, image_resize_policy))
+         return self._present_ref2va(batch, references, device, image_resize_policy)
+@@ -286,6 +307,14 @@
+     @torch.no_grad()
+     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
+         """Encode one H3 prompt presentation and attach its packed text features."""
++        ticket = batch.extra.pop("_h3_conditioning_cache_ticket", None)
++        if ticket is not None:
++            if not isinstance(ticket, tuple) or len(ticket) != 2 or ticket[0] is not self:
++                raise RuntimeError("Conditioning cache ticket has a different owner")
++            prompt_embeds, text_token_tags = ticket[1]
++            batch.prompt_embeds = [prompt_embeds]
++            batch.extra[MINIMAX_H3_TEXT_TOKEN_TAGS_KEY] = text_token_tags
++            return batch
+         device = get_local_torch_device()
+         first_param = next(self.conditioner.parameters(), None)
+         moved_for_forward = (getattr(self, "manage_cpu_offload", True) and fastvideo_args.text_encoder_cpu_offload
+--- a/fastvideo/pipelines/basic/minimax_h3/minimax_h3_pipeline.py
++++ b/fastvideo/pipelines/basic/minimax_h3/minimax_h3_pipeline.py
+@@ -4,9 +4,10 @@
+ from __future__ import annotations
+ 
+ import gc
++import hashlib
+ import json
+ import math
+-from dataclasses import dataclass
++from dataclasses import asdict, dataclass
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -265,6 +266,7 @@
+         ``_pinned_swap`` reuses a parameter's stored host copy across parks; a LoRA
+         swap/merge/unmerge changes the weights, so the stale copy must not win.
+         """
++        self._invalidate_conditioning_placement_memo()
+         for module in self.modules.values():
+             getattr(module, "__dict__", {}).pop("_pinned_host_tensors", None)
+ 
+@@ -284,6 +286,8 @@
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         self._ref2va = getattr(self, "_ref2va_default", False)
+         self._denoise_stages_ready = False
++        self._conditioning_cache_epoch = 0
++        self._conditioning_placement_ready = False
+         super().__init__(*args, **kwargs)
+ 
+     @classmethod
+@@ -642,15 +646,194 @@
+         if restored:
+             logger.info("Restored MiniMax-H3 denoise modules to %s", device)
+ 
+-    def _run_condition_then_denoise(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
++    def _invalidate_conditioning_placement_memo(self) -> None:
++        self._conditioning_cache_epoch = getattr(self, "_conditioning_cache_epoch", 0) + 1
++        self._conditioning_placement_ready = False
++        stage = getattr(self, "_stage_name_mapping", {}).get("conditioning_stage")
++        if stage is not None:
++            stage._ref2va_memo.clear()
++
++    def add_module(self, module_name: str, module: Any) -> None:
++        if (module_name in {"text_encoder", "tokenizer", "processor"}
++                and getattr(self, "modules", {}).get(module_name) is not module):
++            self._invalidate_conditioning_placement_memo()
++        super().add_module(module_name, module)
++
++    def _conditioning_ingress(self, args) -> dict:
++        """All SP ranks enter before any placement/encoder-split branch.
++
++        The cache-stack A/B control arm also votes. This checks expert switches
++        and local mode guards before a rank may enter the cache-hit ballot.
++        """
++        from fastvideo.distributed.parallel_state import get_sp_group
++
++        group = get_sp_group()
++        enabled = requested = diagnostic = failed = False
+         try:
+-            for name in ("input_preparation_stage", "conditioning_stage"):
+-                batch = self._stage_name_mapping[name](batch, fastvideo_args)
++            enabled = envs.FASTVIDEO_H3_CONDITIONING_CACHE_FASTPATH.get()
++            diagnostic = envs.FASTVIDEO_H3_SP_PROFILE.get()
++            requested = self._conditioning_fastpath_requested(args)
++            valid_group = group.world_size == args.sp_size and group.cpu_group is not None
++            failed = not valid_group
++        except Exception:
++            failed = True
++        vote = torch.tensor(
++            [int(enabled), int(requested), int(diagnostic), int(failed)], dtype=torch.int64, device="cpu")
++        if group.world_size > 1:
++            torch.distributed.all_reduce(vote, op=torch.distributed.ReduceOp.SUM, group=group.cpu_group)
++        enabled_count, requested_count, diagnostic_count, failures = (int(value) for value in vote.tolist())
++        n = group.world_size
++        if (failures or enabled_count not in (0, n) or requested_count not in (0, n) or diagnostic_count not in (0, n)
++                or enabled_count != requested_count):
++            raise RuntimeError("Conditioning cache SP ingress disagreement or unsupported scope")
++        ordinal = getattr(self, "_conditioning_request_ordinal", 0) + 1
++        self._conditioning_request_ordinal = ordinal
++        return {
++            "schema_version": 1,
++            "rank": group.rank_in_group,
++            "ranks": n,
++            "request_ordinal": ordinal,
++            "enabled": enabled,
++            "diagnostic": diagnostic,
++            "decision": "pending" if enabled else "off",
++            "hits": None,
++            "placement_calls": {
++                name: 0
++                for name in ("park", "ensure_encoder", "release_encoder", "load_denoise", "restore")
++            },
++            "dit_forward_count": 0 if diagnostic else None
++        }
++
++    def _conditioning_event(self, event, completed=None) -> None:
++        context = self._conditioning_request_context
++        # Fixed keys and numeric state only: no prompt, ref paths or pixel hash.
++        logger.info("H3_CONDITIONING_CACHE_EVENT %s",
++                    json.dumps({
++                        **context, "event": event,
++                        "completed": completed
++                    }, sort_keys=True))
++
++    def _conditioning_placement_call(self, name) -> None:
++        context = getattr(self, "_conditioning_request_context", None)
++        if context is not None:
++            context["placement_calls"][name] += 1
++
++    def _conditioning_fastpath_requested(self, args) -> bool:
++        # Ray's ordinary synchronous actor and the existing one-request worker own
++        # serialization. This draft deliberately excludes other execution modes.
++        return (envs.FASTVIDEO_H3_CONDITIONING_CACHE_FASTPATH.get() and self._ref2va and args.inference_mode
++                and not bool(getattr(args, "training_mode", False)) and args.h3_sequential_load is True
++                and not bool(getattr(args, "lazy_module_load", False)) and not h3_encoder_split_enabled(args)
++                and not args.dit_cpu_offload and not args.dit_layerwise_offload and not args.use_fsdp_inference
++                and not getattr(self, "lora_initialized", False) and not getattr(self, "lora_path", None)
++                and args.tp_size == 1 and args.distributed_executor_backend == "ray")
++
++    @torch.no_grad()
++    def _prepare_cached_conditioning(self, batch, args, *, preparation_failed=False) -> bool:
++        from fastvideo.distributed.parallel_state import get_sp_group
++
++        # Every SP rank enters this ballot, including ranks without live stages or
++        # an entry. Local eligibility MUST NOT return before the collective.
++        group = get_sp_group()
++        if group.world_size != args.sp_size or group.cpu_group is None:
++            raise RuntimeError("Conditioning fastpath requires the initialized SP CPU group")
++        stage = self._stage_name_mapping.get("conditioning_stage")
++        ticket = None
++        failed = preparation_failed
++        try:
++            if not failed:
++                ticket = self._local_conditioning_cache_ticket(batch, args)
++        except Exception:
++            # A local failure must not let peers advance to a different Qwen
++            # collective. Report only a boolean and fail the whole SP request.
++            failed = True
++        vote = torch.tensor([int(ticket is not None), int(failed)], dtype=torch.int64, device="cpu")
++        if group.world_size > 1:
++            torch.distributed.all_reduce(vote, op=torch.distributed.ReduceOp.SUM, group=group.cpu_group)
++        hits, failures = (int(value) for value in vote.tolist())
++        context = getattr(self, "_conditioning_request_context", None)
++        if context is not None:
++            context["hits"] = hits
++            context["decision"] = "error" if failures else "hit" if hits == group.world_size else "miss"
++        if failures:
++            if stage is not None:
++                stage._ref2va_memo.clear()
++            raise RuntimeError("Conditioning cache probe failed on an SP rank; request aborted uniformly")
++        if hits == group.world_size:
++            batch.extra["_h3_conditioning_cache_ticket"] = ticket
++            logger.info("H3_CONDITIONING_FASTPATH decision=hit hits=%d ranks=%d", hits, group.world_size)
++            return True
++        # Uniform recompute: an otherwise cached rank must not skip the Qwen
++        # collective while a peer misses. No prompt/pixels/digests enter logs.
++        if stage is not None:
++            stage._ref2va_memo.clear()
++        logger.info("H3_CONDITIONING_FASTPATH decision=miss hits=%d ranks=%d", hits, group.world_size)
++        return False
++
++    def _local_conditioning_cache_ticket(self, batch: Any, args: Any) -> Any:
++        from fastvideo.distributed import get_local_torch_device
++        from fastvideo.pipelines.lazy_module import is_lazy_module
++
++        stage = self._stage_name_mapping.get("conditioning_stage")
++        ticket = None
++        refs = list(batch.references or [])
++        modules = {
++            name: self.get_module(name)
++            for name in ("text_encoder", "tokenizer", "processor", "transformer", "vae", "audio_vae")
++        }
++        live = (self._conditioning_placement_ready and self._denoise_stages_ready and self._denoise_modules_loaded()
++                and not self._unified_memory_host() and all(value is not None and not is_lazy_module(value)
++                                                            for value in modules.values()) and stage is not None
++                and stage.ref2va and not stage.manage_cpu_offload and stage.conditioner is modules["text_encoder"]
++                and stage.tokenizer is modules["tokenizer"] and stage.processor is modules["processor"]
++                and isinstance(batch.prompt, str) and bool(refs)
++                and all(ref.media_type == "image" and ref.image is not None and not ref.has_audio for ref in refs))
++        if live and all(name in self._stage_name_mapping for name in ("latent_preparation_stage", "denoising_stage",
++                                                                      "video_decoding_stage", "audio_decoding_stage")):
++            live = (self._stage_name_mapping["latent_preparation_stage"].vae is modules["vae"]
++                    and self._stage_name_mapping["latent_preparation_stage"].audio_vae is modules["audio_vae"]
++                    and self._stage_name_mapping["denoising_stage"].transformer is modules["transformer"]
++                    and self._stage_name_mapping["video_decoding_stage"].vae is modules["vae"]
++                    and self._stage_name_mapping["audio_decoding_stage"].audio_vae is modules["audio_vae"])
++        else:
++            live = False
++        # Configure scope even on the first request so its normal conditioning
++        # result can serve the second request. Unknown serializers disable hits.
++        try:
++            if stage is not None:
++                config = json.dumps(asdict(args.pipeline_config), sort_keys=True, default=str)
++                processor_config = stage.processor.image_processor.to_json_string()
++                tokenizer_config = stage.tokenizer.backend_tokenizer.to_str()
++                scope_digest = hashlib.sha256((config + processor_config + tokenizer_config).encode()).hexdigest()
++                stage.configure_placement_memo_scope(
++                    (stage.conditioner, stage.tokenizer, stage.processor, self._conditioning_cache_epoch, scope_digest))
++                if live:
++                    ticket = stage.probe_placement_memo(batch, get_local_torch_device(),
++                                                        args.pipeline_config.h3_reference_image_resize_policy)
++        except (AttributeError, TypeError, ValueError):
++            ticket = None
++        return ticket
++
++    def _run_condition_then_denoise(self,
++                                    batch: ForwardBatch,
++                                    fastvideo_args: FastVideoArgs,
++                                    *,
++                                    input_prepared: bool = False,
++                                    conditioning_cached: bool = False) -> ForwardBatch:
++        try:
++            if not input_prepared:
++                batch = self._stage_name_mapping["input_preparation_stage"](batch, fastvideo_args)
++            batch = self._stage_name_mapping["conditioning_stage"](batch, fastvideo_args)
+         finally:
+-            self._release_text_encoder()
+-        self._load_denoise_modules(fastvideo_args)
+-        if not self._unified_memory_host():
+-            self._restore_denoise_modules(fastvideo_args)
++            if not conditioning_cached:
++                self._conditioning_placement_call("release_encoder")
++                self._release_text_encoder()
++        if not conditioning_cached:
++            self._conditioning_placement_call("load_denoise")
++            self._load_denoise_modules(fastvideo_args)
++            if not self._unified_memory_host():
++                self._conditioning_placement_call("restore")
++                self._restore_denoise_modules(fastvideo_args)
+         if not self._denoise_stages_ready:
+             self._add_denoise_stages(ref2va=self._ref2va)
+         for name in (
+@@ -659,7 +842,19 @@
+                 "video_decoding_stage",
+                 "audio_decoding_stage",
+         ):
+-            batch = self._stage_name_mapping[name](batch, fastvideo_args)
++            handle = None
++            context = getattr(self, "_conditioning_request_context", None)
++            if name == "denoising_stage" and context is not None and context["diagnostic"]:
++
++                def count_forward(_module, _inputs, context=context):
++                    context["dit_forward_count"] += 1
++
++                handle = self._stage_name_mapping[name].transformer.register_forward_pre_hook(count_forward)
++            try:
++                batch = self._stage_name_mapping[name](batch, fastvideo_args)
++            finally:
++                if handle is not None:
++                    handle.remove()
+         return batch
+ 
+     def _input_video_geometry(self, fastvideo_args: FastVideoArgs) -> Any:
+@@ -795,7 +990,20 @@
+     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
+         if not self.post_init_called:
+             self.post_init()
+-
++        self._conditioning_request_context = self._conditioning_ingress(fastvideo_args)
++        self._conditioning_event("begin")
++        try:
++            result = self._forward_conditioning_placement(batch, fastvideo_args)
++            self._conditioning_event("end", completed=True)
++            return result
++        except BaseException:
++            self._invalidate_conditioning_placement_memo()
++            self._conditioning_event("end", completed=False)
++            raise
++        finally:
++            del self._conditioning_request_context
++
++    def _forward_conditioning_placement(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
+         if h3_encoder_split_enabled(fastvideo_args):
+             try:
+                 return self._forward_encoder_split(batch, fastvideo_args)
+@@ -809,15 +1017,39 @@
+         # when neither deferral flag was on.
+         if self._defer_denoise_modules(fastvideo_args):
+             try:
+-                if not self._unified_memory_host():
+-                    self._park_denoise_modules()
+-                self._ensure_text_encoder(fastvideo_args)
++                # Never accept a ticket supplied by a request or a previous call.
++                batch.extra.pop("_h3_conditioning_cache_ticket", None)
++                prepared = False
++                cached = False
++                if self._conditioning_request_context["enabled"]:
++                    preparation_failed = False
++                    try:
++                        batch = self._stage_name_mapping["input_preparation_stage"](batch, fastvideo_args)
++                    except Exception:
++                        preparation_failed = True
++                    prepared = True
++                    cached = self._prepare_cached_conditioning(batch,
++                                                               fastvideo_args,
++                                                               preparation_failed=preparation_failed)
++                self._conditioning_placement_ready = False
++                if not cached:
++                    if not self._unified_memory_host():
++                        self._conditioning_placement_call("park")
++                        self._park_denoise_modules()
++                    self._conditioning_placement_call("ensure_encoder")
++                    self._ensure_text_encoder(fastvideo_args)
+                 if self._denoise_stages_ready:
+                     logger.info("Running MiniMax-H3 condition stages before denoise (subsequent request)")
+                 else:
+                     logger.info("Running MiniMax-H3 condition stages before loading DiT/VAE weights")
+-                return self._run_condition_then_denoise(batch, fastvideo_args)
++                result = self._run_condition_then_denoise(batch,
++                                                          fastvideo_args,
++                                                          input_prepared=prepared,
++                                                          conditioning_cached=cached)
++                self._conditioning_placement_ready = True
++                return result
+             except BaseException:
++                self._invalidate_conditioning_placement_memo()
+                 self._release_all_lazy_modules()
+                 raise
+         return super().forward(batch, fastvideo_args)
+--- a/docs/contributing/env_vars.md
++++ b/docs/contributing/env_vars.md
+@@ -278,6 +278,7 @@
+ | `FASTVIDEO_H3_ENCODER_LAYERWISE`                           | bool                                                               | `0`                                                   | performance | Stream MiniMax-H3 text-encoder language layers through exact-size pinned host memory (text-only prompts).                                                                                                                                                                                                                                                                                                                                   |
+ | `FASTVIDEO_H3_ENCODER_FUSED_DEQUANT`                       | bool                                                               | `0`                                                   | performance | Expand the serialized NVFP4 MiniMax-H3 text encoder with one fused Triton pass on GPUs without FP4 GEMM.                                                                                                                                                                                                                                                                                                                                    |
+ | `FASTVIDEO_H3_VAE_TILE_BATCH`                              | int                                                                | `1`                                                   | performance | Spatial tiles per MiniMax-H3 video VAE decoder call; 1 decodes per tile.                                                                                                                                                                                                                                                                                                                                                                    |
++| `FASTVIDEO_H3_CONDITIONING_CACHE_FASTPATH`                 | bool                                                               | `0`                                                   | performance | Opt-in discrete sequential Ref2VA conditioning-memo placement fastpath; all SP ranks must hit.                                                                                                                                                                                                                                                                                                                                              |
+ | `FASTVIDEO_H3_REF2VA_MEMO_ENTRIES`                         | int                                                                | `0`                                                   | performance | Entries in each content-keyed MiniMax-H3 memo of reference encodes (Qwen3-VL Ref2VA presentation, VAE keyframe latents); repeat references are reused exactly. 0 disables.                                                                                                                                                                                                                                                                  |
+ | `FASTVIDEO_H3_VAE_TILE_PARALLEL`                           | bool                                                               | `0`                                                   | performance | Split MiniMax-H3 VAE spatial tiles (not only temporal chunks) across the sequence-parallel ranks in the parallel decode and keyframe encode; bitwise equal to the serial path.                                                                                                                                                                                                                                                              |
+ | `FASTVIDEO_H3_VAE_NVFP4_FUSED`                             | bool                                                               | `1`                                                   | performance | Run NVFP4 MiniMax-H3 VAE decoder blocks through the bit-exact fused Triton kernels at inference.                                                                                                                                                                                                                                                                                                                                            |

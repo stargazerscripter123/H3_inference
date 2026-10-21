@@ -259,3 +259,68 @@ Source basis: `examples/serving/openai_fasth3_omniref_rtx5090.yaml`,
 `fastvideo/entrypoints/cli/inference_config.py`,
 `fastvideo/entrypoints/openai/serving_engine.py`, and
 `fastvideo/worker/ray_utils.py` at the FastVideo pin above.
+
+## Conditioning placement cache experiment
+
+The cache fastpath is opt-in and defaults off. Set
+`OMNI_SOURCE_PATCH_STACK=reference-cache` with
+`OMNI_CONDITIONING_CACHE_FASTPATH=0` or `1` for a same-source A/B comparison.
+Both flags and the source validator enter the service fingerprint. An inherited
+`FASTVIDEO_H3_CONDITIONING_CACHE_FASTPATH` cannot enable the feature.
+
+This experiment reuses cloned conditioning tensors for an identical prompt and
+ordered static images within one fresh sequential service. It can skip the
+text-encoder/DiT placement cycle after an all-rank cache hit. It does not cache
+DiT outputs across denoising steps or change the sampling schedule. Supported
+scope is TP1/SP2 on GPUs 0,1, Ray, cap480, memo16, eager execution, sequential
+loading, text-encoder offload and resident DiT, without LoRA, encoder split,
+lazy loading or FSDP. Mixed-rank cache misses recompute on all ranks; scope or
+error disagreement fails the request uniformly.
+
+After normal owned shutdown, independently confirm both controllers are
+STOPPED, ports 8108/8188 have no listeners and no GPU compute process remains.
+Then explicitly inspect and apply the exact versioned source stack:
+
+```bash
+"$OMNI_PYTHON" omni-deployment/scripts/omni_source_stack.py check \
+  --project-root "$H3_OMNI_ROOT" --source "$OMNI_FASTVIDEO_SRC" \
+  --expected-stack reference
+"$OMNI_PYTHON" omni-deployment/scripts/omni_source_stack.py apply \
+  --project-root "$H3_OMNI_ROOT" --source "$OMNI_FASTVIDEO_SRC" \
+  --expected-stack reference
+```
+
+The helper verifies the pinned upstream HEAD, exact tracked modification set,
+both patch hashes and all eight source hashes under the controller lock.
+Unknown or partially patched source is rejected; no reset is performed.
+Controllers never apply patches automatically.
+
+`scripts/run_cache_eval.py --arm off|on --mode diagnostic --case case-01`
+uses the sealed business protocol and new record/output paths. Each arm runs
+one first request and three warm requests with distinct seeds, then normally
+stops its owned service and verifies idle state. Run the off arm successfully
+before starting the on arm; do not retry failed generation automatically.
+Diagnostic mode enables SP profiling and temporarily counts actual transformer
+calls on both ranks. Its latencies are excluded from formal results. Structured
+events prove cache decisions and placement-method call counts; those counters
+do not directly measure PCIe bytes.
+
+Formal mode requires two validated, same-protocol/source/decoder diagnostic
+receipts through `--diagnostic-evidence`. It disables forward-count hooks and
+must not be described as instrumented NFE verification. Human quality review is
+separate. The independent cache collector accepts the new source-stack identity;
+the original reference-only collector deliberately rejects it.
+
+After the trial and normal owned shutdown, restore the exact reference source:
+
+```bash
+"$OMNI_PYTHON" omni-deployment/scripts/omni_source_stack.py revert \
+  --project-root "$H3_OMNI_ROOT" --source "$OMNI_FASTVIDEO_SRC" \
+  --expected-stack reference-cache
+export OMNI_SOURCE_PATCH_STACK=reference OMNI_CONDITIONING_CACHE_FASTPATH=0
+```
+
+This restores reference-only source bytes and the baseline numerical recipe.
+Updated launcher/validator code still gives a new service fingerprint.
+Portable CPU regressions are in `tests/test_omni_cache_contract.py`; passing
+them alone is not evidence of GPU speed or visual quality.
