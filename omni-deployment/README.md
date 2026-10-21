@@ -6,14 +6,23 @@ image/video/audio generation requests and sequential benchmarks. SP2 means
 sequence parallelism with replicated NVFP4 weights and parallel VAE; TP stays 1.
 Two 32-GB cards do not become one 64-GB memory pool.
 
-**Status on 2026-10-21:** The pinned environment, model assets, AdaLN table and
-SP2 generation path have been verified. At the user's request, the former test
-case plans and video/statistics outputs have been removed from current
-acceptance. Evaluation now uses real business requests across reference-image
-cap480, cap720 and original-size policies, with fixed 480p output. These new
-business results are pending; historical synthetic timings do not establish
-business latency or quality. See [the evaluation contract](benchmarks/README.md).
-Environment and immutable model evidence remain in [ENVIRONMENT.md](ENVIRONMENT.md).
+**Status on 2026-10-21:** Business evaluation completed successfully: three
+distinct authorized requests × three reference-image policies (cap480, cap720,
+original) × four runs = **36/36 successful requests**. This includes nine
+fresh-service first requests and 27 warm measurements (N=3 per case/policy).
+Original prompts and ordered references stayed fixed across policies; seeds
+varied across repetitions. Output was 480×832, 362 frames at 24 fps; cap720
+allows a short edge of at most 704 after alignment to the model's 32-pixel grid.
+
+Client request times were 54.865–97.121 s for first requests and 37.396–79.002 s
+for warm measurements, excluding service startup. Report these groups
+separately: N=3 does not establish a tail-latency SLA, and the 15-second latency
+target was not met. Human audiovisual quality review remains pending. The
+source API's independent `image_url` first-frame conditioning is unsupported
+by local Ref2VA; preserving that image as an ordered reference is not equivalent.
+Former test cases remain outside current acceptance. See [the evaluation
+contract](benchmarks/README.md). Environment and immutable model evidence remain
+in [ENVIRONMENT.md](ENVIRONMENT.md).
 
 ## Fixed source and model versions
 
@@ -26,7 +35,7 @@ Environment and immutable model evidence remain in [ENVIRONMENT.md](ENVIRONMENT.
 | Torch / CUDA wheels | Pinned source requires Torch 2.12.0; target installation uses cu130 | Installed; targeted native GPU tests passed; resolved freeze recorded |
 | FastVideo kernel | Build from the fixed FastVideo source; PyPI 0.3.5 predates the required sparse FP4 API | Built from pinned source for sm120a; targeted numerical tests passed |
 | CUDA build tools | NVCC 13.0.88 and CCCL 13.0.85 | Installed with env-local development-library links; source build passed |
-| Ray | Source requires `>=2.49.1`; health adapter reviewed against 2.49.1 | Installed Ray2.59.0; private GCS ALIVE probe passed; native SP2 READY, five media requests and normal shutdown passed; memory variant under test |
+| Ray | Source requires `>=2.49.1`; health adapter reviewed against 2.49.1 | Installed Ray2.59.0; private GCS ALIVE probe passed; nine fresh SP2 services completed 36/36 business requests and stopped normally with VAE offload and expandable allocation enabled |
 | Optional FA4 stack | Source pins FlashAttention `14c377950125c70b7a9dabf9c561fca53715ac7d`, CuTe DSL `4.6.0.dev0`, quack `0.5.3` | These are upstream requirements, not an installed lock; serving recipe sets `FASTVIDEO_FA4=0` |
 
 The new host reports Pop!_OS 24.04, driver 595.104.02, about 125 GiB RAM, GPU0
