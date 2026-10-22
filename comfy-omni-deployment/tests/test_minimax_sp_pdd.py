@@ -19,6 +19,22 @@ AFTER = ROOT / "custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
 CONTRACT = ROOT / "sp-node-contract.json"
 
 
+AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax imports\n', '# END reviewed SP2 activation amax imports\n\n', '1b89b51415c462249567b03f9fd53c023b77076555b0b14dd95dc0cbf35b9a56'), 'scope': ('# BEGIN reviewed SP2 activation amax scope\n', '# END reviewed SP2 activation amax scope\n\n', '3d826580e83279db44b64a125ac8d50af10bc4eae65529e417a0f9e78c170eba'), 'loop': ('    # BEGIN reviewed SP2 activation amax loop\n', '    # END reviewed SP2 activation amax loop\n', '47af9e1d2d2d2eeacb2eb9d6e33394e2cfe7584587e0a62e61094fe514ad5675')}
+AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
+
+
+def reverse_amax_scope(source):
+    """Reverse only reviewed exact imports/scope/loop; retain original upstream SHA."""
+    for name,(start,stop,digest) in AMAX_REVIEWED_BLOCKS.items():
+        if source.count(start)!=1 or source.count(stop)!=1:
+            raise AssertionError('SP2 amax reviewed block markers changed')
+        lo=source.index(start);hi=source.index(stop,lo)+len(stop)
+        if hashlib.sha256(source[lo:hi].encode()).hexdigest()!=digest:
+            raise AssertionError('SP2 amax reviewed block digest changed')
+        source=source[:lo]+(AMAX_ORIGINAL_LOOP if name=='loop' else '')+source[hi:]
+    return source
+
+
 WORLD1_BRANCHES = (
     "    if ctx.world == 1:\n"
     "        # Diagnostic mirror: preserve fresh-buffer semantics without a new PG.\n"
@@ -41,7 +57,7 @@ def reverse_world1_branches(source):
 
 def original_source():
     """Reverse reviewed world1 branches, two widths, and one collective API."""
-    source = reverse_world1_branches(AFTER.read_text())
+    source = reverse_world1_branches(reverse_amax_scope(AFTER.read_text()))
     for local, attribute in (("v_local", "video_out"), ("a_local", "audio_out")):
         before = f"{local}.shape[-1], device)"
         after = f"dit.final_layer.{attribute}.out_features, device)"
@@ -189,7 +205,7 @@ class PDDGatherTests(unittest.TestCase):
 
     def test_only_reviewed_width_api_and_world1_identity_changes(self):
         before = tree(BEFORE)
-        after = tree(reverse_world1_branches(AFTER.read_text()))
+        after = tree(reverse_world1_branches(reverse_amax_scope(AFTER.read_text())))
         for name in ("v", "a"):
             old = width_expression(before, name)
             replacement = width_expression(after, name)
@@ -422,6 +438,252 @@ class MirrorDiagnosticTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'both video and audio'):
             f.parity([ParityArray([1.])], [ParityArray([1.]),ParityArray([1.])])
 
+
+
+# BEGIN GLOBAL NVFP4 AMAX CPU CONTRACT TESTS
+# Append before the existing unittest.main() guard in test_minimax_sp_pdd.py.
+# Reads actual integrated source AST, never imports Comfy/Torch or model weights.
+import contextvars as _amax_contextvars
+import threading as _amax_threading
+import types as _amax_types
+
+_GLOBAL_AMAX_SOURCE = Path(__file__).resolve().parents[1] / 'custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py'
+_GLOBAL_AMAX_QUANTIZE_FILE_SHA = '37f0054dfbd8430524ac2c73dafd25b8ad4eabc490a2b7490eeebde8dffbc749'
+# Native method from ComfyUI b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c,
+# comfy/quant_ops.py:151-180. Fake packing tests the scale contract, not FP4 kernels.
+_GLOBAL_AMAX_NATIVE_QUANTIZE = '@classmethod\ndef quantize(cls, tensor, scale=None, stochastic_rounding=0, inplace_ops=False):\n    if tensor.dim() != 2:\n        raise ValueError(f"NVFP4 requires 2D tensor, got {tensor.dim()}D")\n\n    orig_dtype = tensor.dtype\n    orig_shape = tuple(tensor.shape)\n\n    if scale is None or (isinstance(scale, str) and scale == "recalculate"):\n        scale = torch.amax(tensor.abs()) / (ck.float_utils.F8_E4M3_MAX * ck.float_utils.F4_E2M1_MAX)\n\n    if not isinstance(scale, torch.Tensor):\n        scale = torch.tensor(scale)\n    scale = scale.to(device=tensor.device, dtype=torch.float32)\n\n    padded_shape = cls.get_padded_shape(orig_shape)\n    needs_padding = padded_shape != orig_shape\n\n    if stochastic_rounding > 0:\n        qdata, block_scale = comfy.float.stochastic_round_quantize_nvfp4_by_block(tensor, scale, pad_16x=needs_padding, seed=stochastic_rounding)\n    else:\n        qdata, block_scale = ck.quantize_nvfp4(tensor, scale, pad_16x=needs_padding)\n\n    params = cls.Params(\n        scale=scale,\n        orig_dtype=orig_dtype,\n        orig_shape=orig_shape,\n        block_scale=block_scale,\n    )\n    return qdata, params\n'
+_GLOBAL_AMAX_METHOD_SHA = 'a99a89e2bd61e1bcb5faab9be5f479d29772dceea9e50d5944959b75ca4011c9'
+
+
+def _load_global_amax_scope_ast():
+    source = ast.parse(_GLOBAL_AMAX_SOURCE.read_text())
+    constants = {'_SP_NVFP4_TICKET', '_SP_NVFP4_LOCK', '_ABSENT'}
+    nodes = [node for node in source.body if
+             (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in constants for t in node.targets))
+             or (isinstance(node, ast.ClassDef) and node.name == 'SPNVFP4AmaxScope')]
+    if len(nodes) != 4:
+        raise AssertionError('expected exactly three scope globals and the actual scope class')
+    namespace = {'ContextVar': _amax_contextvars.ContextVar, 'threading': _amax_threading, 'types': _amax_types}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<actual-integrated-SP-amax-scope>', 'exec'), namespace)
+    return SimpleNamespace(**namespace)
+
+class GlobalAmaxTensor:
+    requires_grad=False
+    def __init__(self,value):self.value=np.array(value,dtype=np.float32);self.dtype='float32';self.device='cpu'
+    @property
+    def shape(self):return self.value.shape
+    def dim(self):return self.value.ndim
+    def abs(self):return GlobalAmaxTensor(np.abs(self.value))
+    def __truediv__(self,value):return GlobalAmaxTensor(self.value/value)
+    def to(self,**kwargs):return self
+
+
+class GlobalAmaxDist:
+    ReduceOp=SimpleNamespace(MAX='max')
+    def __init__(self,global_max=64):self.reductions=0;self.global_max=global_max;self.inventory_calls=0
+    def get_world_size(self,group):return 2
+    def all_gather_object(self,output,value,group):
+        self.inventory_calls+=1;output[:]=[value,value]
+    def all_reduce(self,value,op,group):
+        assert op=='max';self.reductions+=1
+        value.value=np.maximum(value.value,np.float32(self.global_max))
+
+
+def global_amax_fixture():
+    # Fixed native scalar oracle + actual inlined implementation under test.
+    m = _load_global_amax_scope_ast()
+    assert hashlib.sha256(_GLOBAL_AMAX_NATIVE_QUANTIZE.encode()).hexdigest() == _GLOBAL_AMAX_METHOD_SHA
+    fn = ast.parse(_GLOBAL_AMAX_NATIVE_QUANTIZE).body[0]
+    calls=[]
+    def pack(tensor,scale,**kwargs):
+        calls.append({'scale':float(scale.value),'shape':tensor.shape,**kwargs})
+        return tensor,None
+    torch=SimpleNamespace(Tensor=GlobalAmaxTensor,float32='float32',amax=lambda t:GlobalAmaxTensor(np.max(t.value)),tensor=GlobalAmaxTensor)
+    ck=SimpleNamespace(float_utils=SimpleNamespace(F8_E4M3_MAX=448.,F4_E2M1_MAX=6.),quantize_nvfp4=pack)
+    namespace={'torch':torch,'ck':ck,'comfy':SimpleNamespace(float=SimpleNamespace(stochastic_round_quantize_nvfp4_by_block=pack))}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),'<pinned-quantize-AST>','exec'),namespace)
+    Layout=type('Layout',(),{'quantize':namespace['quantize'],'Params':SimpleNamespace,
+      'get_padded_shape':staticmethod(lambda shape:tuple((n+15)//16*16 for n in shape))})
+    class QuantizedTensor:pass
+    ops=SimpleNamespace(TensorCoreNVFP4Layout=Layout,QuantizedTensor=QuantizedTensor,ck=ck)
+    class Module:
+        quant_format='nvfp4';layout_type='TensorCoreNVFP4Layout'
+        _full_precision_mm=False;comfy_force_cast_weights=False
+        weight_function=[];bias_function=[];in_features=16;out_features=16
+        def forward(self,input):
+            result=Layout.quantize(input,scale=getattr(self,'input_scale',None))
+            if getattr(self,'weight_requant',False):Layout.quantize(GlobalAmaxTensor([[256]]),scale='recalculate')
+            if getattr(self,'fail',False):raise RuntimeError('synthetic_forward_failure')
+            return result
+    blocks=[SimpleNamespace(attn=SimpleNamespace(qkv_proj=Module(),out_proj=Module()),mlp=SimpleNamespace(fc1=Module(),fc2=Module())) for _ in range(50)]
+    dit=SimpleNamespace(blocks=blocks);targets=[x for b in blocks for x in (b.attn.qkv_proj,b.attn.out_proj,b.mlp.fc1,b.mlp.fc2)]
+    ctx=SimpleNamespace(world=2,seq_len=6,local=3,group='owned-test-group')
+    dist=GlobalAmaxDist()
+    scope=m.SPNVFP4AmaxScope(dit,ctx,torch_module=torch,dist_module=dist,quant_ops=ops)
+    return scope,targets,Layout,dist,calls
+
+
+class GlobalAmaxScopeTests(unittest.TestCase):
+    def test_global_scale_matches_unsharded_native_and_200_syncs(self):
+        scope,targets,layout,dist,calls=global_amax_fixture();descriptor=layout.__dict__['quantize']
+        native=layout.quantize(GlobalAmaxTensor([[64]*16]*6))[1].scale.value
+        with scope:
+            for module in targets:
+                self.assertEqual(module.forward(GlobalAmaxTensor([[1]*16]*3))[1].scale.value,native)
+        self.assertEqual(dist.reductions,200)
+        self.assertEqual(scope.counts()['per_block'],[4]*50)
+        self.assertIs(layout.__dict__['quantize'],descriptor)
+        self.assertTrue(all('forward' not in module.__dict__ for module in targets))
+        before=dist.reductions;layout.quantize(GlobalAmaxTensor([[1]*16]*6))
+        self.assertEqual(dist.reductions,before) # rank0 native oracle after scope
+
+    def test_fixed_tensor_and_float_scales_unchanged_weight_requant_not_synchronized(self):
+        scope,targets,layout,dist,calls=global_amax_fixture()
+        fixed=GlobalAmaxTensor(0.5);targets[0].input_scale=fixed;targets[1].input_scale=0.25
+        targets[2].weight_requant=True
+        with scope:
+            for module in targets:module.forward(GlobalAmaxTensor([[1]*16]*3))
+        self.assertEqual(dist.reductions,198)
+        self.assertIs(targets[0].input_scale,fixed);self.assertEqual(targets[1].input_scale,0.25)
+        self.assertEqual(calls[0]['scale'],0.5);self.assertEqual(calls[1]['scale'],0.25)
+        self.assertAlmostEqual(calls[3]['scale'],256/2688,places=7)
+
+    def test_exception_restores_existing_forward_descriptor_and_context(self):
+        scope,targets,layout,dist,calls=global_amax_fixture();descriptor=layout.__dict__['quantize']
+        original=targets[0].forward;targets[0].forward=original;targets[0].fail=True
+        with self.assertRaisesRegex(RuntimeError,'synthetic_forward_failure'):
+            with scope:targets[0].forward(GlobalAmaxTensor([[1]*16]*3))
+        self.assertIs(targets[0].__dict__['forward'],original)
+        self.assertIs(layout.__dict__['quantize'],descriptor)
+        self.assertIsNone(scope._forward_wrapper.__globals__['_SP_NVFP4_TICKET'].get())
+        self.assertFalse(scope._forward_wrapper.__globals__['_SP_NVFP4_LOCK'].locked())
+
+    def test_other_thread_and_unrelated_quantize_do_not_reduce(self):
+        scope,targets,layout,dist,calls=global_amax_fixture()
+        with self.assertRaisesRegex(RuntimeError,'end_scope'):
+            with scope:
+                thread=_amax_threading.Thread(target=lambda:layout.quantize(GlobalAmaxTensor([[2]*16]*3)))
+                thread.start();thread.join()
+                thread=_amax_threading.Thread(target=lambda:targets[0].forward(GlobalAmaxTensor([[2]*16]*3)))
+                thread.start();thread.join()
+                layout.quantize(GlobalAmaxTensor([[2]*16]*3))
+                self.assertEqual(dist.reductions,0)
+                self.assertEqual(sum(scope.calls.values()),0)
+                raise RuntimeError('end_scope')
+
+    def test_zero_scale_and_padding_follow_native(self):
+        scope,targets,layout,dist,calls=global_amax_fixture();dist.global_max=0
+        native=layout.quantize(GlobalAmaxTensor([[0]*16]*3))[1].scale.value
+        with scope:
+            for module in targets:self.assertEqual(module.forward(GlobalAmaxTensor([[0]*16]*3))[1].scale.value,native)
+        self.assertEqual(float(native),0)
+        self.assertTrue(all(call['pad_16x'] for call in calls))
+
+    def test_uniform_inventory_rejects_wrong_scope_without_patching(self):
+        scope,targets,layout,dist,calls=global_amax_fixture();descriptor=layout.__dict__['quantize']
+        scope.ctx.local=0
+        with self.assertRaisesRegex(RuntimeError,'rank_inventory_mismatch'):
+            with scope:pass
+        self.assertEqual(dist.reductions,0)
+        self.assertIs(layout.__dict__['quantize'],descriptor)
+        self.assertTrue(all('forward' not in module.__dict__ for module in targets))
+
+
+    def test_inventory_signature_failure_releases_lock_and_participates_in_ballot(self):
+        scope,targets,layout,dist,calls=global_amax_fixture()
+        descriptor=layout.__dict__['quantize']
+        class BrokenInventory(type(targets[0])):
+            @property
+            def out_features(self):
+                raise AttributeError('synthetic_missing_out_features')
+        targets[0].__class__=BrokenInventory
+        with self.assertRaisesRegex(RuntimeError,'rank_inventory_mismatch'):
+            with scope:pass
+        self.assertEqual(dist.inventory_calls,1)
+        self.assertFalse(scope._forward_wrapper.__globals__['_SP_NVFP4_LOCK'].locked())
+        self.assertIs(layout.__dict__['quantize'],descriptor)
+        self.assertTrue(all('forward' not in module.__dict__ for module in targets))
+
+    def test_same_scope_reentry_does_not_restore_outer_scope(self):
+        scope,targets,layout,dist,calls=global_amax_fixture()
+        descriptor=layout.__dict__['quantize']
+        with scope:
+            active_descriptor=layout.__dict__['quantize']
+            with self.assertRaises(RuntimeError):scope.__enter__()
+            self.assertIs(layout.__dict__['quantize'],active_descriptor)
+            for module in targets:module.forward(GlobalAmaxTensor([[1]*16]*3))
+        self.assertEqual(dist.reductions,200)
+        self.assertIs(layout.__dict__['quantize'],descriptor)
+
+    def test_copy_context_child_quantize_does_not_consume_main_ticket(self):
+        scope,targets,layout,dist,calls=global_amax_fixture()
+        original=targets[0].forward
+        observations=[]
+        def with_context_copy(input):
+            child_context=_amax_contextvars.copy_context()
+            errors=[]
+            def child():
+                try:
+                    result=child_context.run(layout.quantize,GlobalAmaxTensor([[2]*16]*3))
+                    observations.append(float(result[1].scale.value))
+                except BaseException as error:
+                    errors.append(type(error).__name__)
+            thread=_amax_threading.Thread(target=child)
+            thread.start();thread.join()
+            self.assertEqual(errors,[])
+            self.assertEqual(dist.reductions,0)
+            return original(input)
+        targets[0].forward=with_context_copy
+        with scope:
+            for module in targets:module.forward(GlobalAmaxTensor([[1]*16]*3))
+        self.assertAlmostEqual(observations[0],2/2688,places=8)
+        self.assertEqual(dist.reductions,200)
+        self.assertEqual(scope.counts()['per_block'],[4]*50)
+
+# END GLOBAL NVFP4 AMAX CPU CONTRACT TESTS
+
+
+class GlobalAmaxIntegrationTests(unittest.TestCase):
+    def test_reviewed_scope_reversal_is_exact_previous_source_and_rejects_tamper(self):
+        source = AFTER.read_text()
+        self.assertEqual(hashlib.sha256(reverse_amax_scope(source).encode()).hexdigest(),
+                         '51e98f82d164e5c6bf447eaf095ce1dfae0ca4ace10037f695d9f88226142ff3')
+        for old,new in (('scope.dist.ReduceOp.MAX','scope.dist.ReduceOp.SUM'),
+                        ('if ctx.world == 2 else nullcontext()', 'if ctx.world >= 1 else nullcontext()')):
+            with self.subTest(change=old), self.assertRaisesRegex(AssertionError,'reviewed block digest'):
+                reverse_amax_scope(source.replace(old,new,1))
+
+    def test_actual_block_loop_scopes_world2_only_and_restores_before_count_log(self):
+        function = next(n for n in ast.parse(AFTER.read_text()).body
+                        if isinstance(n,ast.FunctionDef) and n.name=='sp_forward')
+        index = next(i for i,n in enumerate(function.body) if isinstance(n,ast.Assign)
+                     and isinstance(n.targets[0],ast.Name) and n.targets[0].id=='scale_context')
+        body = function.body[index:index+3]
+        self.assertEqual([type(n).__name__ for n in body],['Assign','With','If'])
+        for world in (1,2):
+            with self.subTest(world=world):
+                events=[]
+                class Scope:
+                    def __init__(self,*args,**kwargs):events.append('construct')
+                    def __enter__(self):events.append('enter');return self
+                    def __exit__(self,*args):events.append('restore');return False
+                    def counts(self):
+                        events.append('counts')
+                        return {'target_forwards':200,'activation_syncs':200,'per_block':[4]*50}
+                def block(*args):events.append('block');return args[1]+1
+                namespace={'SPNVFP4AmaxScope':Scope,'nullcontext':__import__('contextlib').nullcontext,
+                    'dit':SimpleNamespace(blocks=list(range(50))),'ctx':SimpleNamespace(world=world),
+                    'torch':object(),'dist':object(),'rank':0,'prefetch_queue':None,'device':'cpu',
+                    'comfy':SimpleNamespace(quant_ops=object(),model_prefetch=SimpleNamespace(prefetch_queue_pop=lambda *a,**k:None)),
+                    'transformer_options':{},'h':0,'t_emb':None,'local_segments':None,'rope_for_blocks':None,
+                    'sp_block':block,'os':SimpleNamespace(environ={'MINIMAX_SP_VERIFY':'1'}),
+                    'logging':SimpleNamespace(info=lambda *args:events.append('log'))}
+                exec(compile(ast.Module(body=body,type_ignores=[]),'<actual-SP-block-loop>','exec'),namespace)
+                self.assertEqual(namespace['h'],50)
+                if world==1:
+                    self.assertEqual(events,['block']*50)
+                else:
+                    self.assertEqual(events,['construct','enter']+['block']*50+['restore','counts','log'])
 
 
 if __name__ == "__main__":

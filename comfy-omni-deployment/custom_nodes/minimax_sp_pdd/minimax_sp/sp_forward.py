@@ -14,6 +14,13 @@ Targets the MiniMax H3 API introduced by ComfyUI commit 8d534945.
 sp_forward mirrors MiniMaxH3Model._forward and must be re-checked when it changes.
 """
 
+# BEGIN reviewed SP2 activation amax imports
+from contextlib import nullcontext
+from contextvars import ContextVar
+import threading
+import types
+# END reviewed SP2 activation amax imports
+
 import logging
 import os
 import time
@@ -38,6 +45,181 @@ from comfy.ldm.minimax.model import (
     unpatchify_video,
 )
 from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
+
+# BEGIN reviewed SP2 activation amax scope
+_SP_NVFP4_TICKET = ContextVar('minimax_sp_nvfp4_activation_ticket', default=None)
+_SP_NVFP4_LOCK = threading.Lock()
+_ABSENT = object()
+
+
+class SPNVFP4AmaxScope:
+    """Use immediately around all 50 SP blocks, never around the native oracle.
+
+The classmethod shim delegates unchanged unless this thread is currently inside
+one of this scope's 200 guarded module forwards. A dynamic input consumes its
+ticket before calling native quantize. Weight scale='recalculate', stochastic
+weight requantization, and calibrated/fixed input scales are never synchronized.
+
+Required integration preconditions (not claimed validated by this draft):
+Comfy b1a247c9; kitchen 0.2.39 NVFP4 linear_input_act returns NotImplemented;
+no concurrent model forward; no training/LoRA/function patches; exactly 50
+blocks; nonempty local row shards. Same scope must run on every SP rank.
+"""
+    def __init__(self, dit, ctx, *, torch_module, dist_module, quant_ops):
+        self.dit, self.ctx = dit, ctx
+        self.torch, self.dist, self.quant_ops = torch_module, dist_module, quant_ops
+        self.layout = quant_ops.TensorCoreNVFP4Layout
+        self.saved = []
+        self.calls = {}
+        self.syncs = {}
+        self.entered = False
+
+    def _inventory(self):
+        if self.ctx.world != 2 or self.ctx.seq_len < self.ctx.world or self.ctx.local <= 0:
+            raise RuntimeError('sp_amax_requires_two_nonempty_row_shards')
+        if self.dist.get_world_size(self.ctx.group) != self.ctx.world:
+            raise RuntimeError('sp_amax_group_size_mismatch')
+        if len(self.dit.blocks) != 50:
+            raise RuntimeError('sp_amax_requires_50_blocks')
+        targets = []
+        for index, block in enumerate(self.dit.blocks):
+            for name, module in (('attn.qkv_proj',block.attn.qkv_proj),
+                                 ('attn.out_proj',block.attn.out_proj),
+                                 ('mlp.fc1',block.mlp.fc1),('mlp.fc2',block.mlp.fc2)):
+                if (getattr(module,'quant_format',None) != 'nvfp4'
+                    or getattr(module,'layout_type',None) != 'TensorCoreNVFP4Layout'
+                    or getattr(module,'_full_precision_mm',False)
+                    or getattr(module,'comfy_force_cast_weights',False)
+                    or getattr(module,'weight_function',())
+                    or getattr(module,'bias_function',())):
+                    raise RuntimeError('sp_amax_target_quantization_guard_failed')
+                input_scale = getattr(module,'input_scale',None)
+                if input_scale is not None and not (isinstance(input_scale,self.torch.Tensor)
+                        or type(input_scale) in (int,float)):
+                    raise RuntimeError('sp_amax_unsupported_module_input_scale')
+                targets.append((f'blocks.{index}.{name}',module))
+        if len({id(module) for _,module in targets}) != 200:
+            raise RuntimeError('sp_amax_target_alias_rejected')
+        return targets
+
+    def __enter__(self):
+        if self.entered or self.saved or getattr(self,'locked',False):
+            raise RuntimeError('sp_amax_scope_reentry_rejected')
+        self.thread_id = threading.get_ident()
+        # Rank-local inventory failure still participates in the same preflight.
+        error = None
+        targets = []
+        signature = []
+        try:
+            targets = self._inventory()
+            signature = [(name,getattr(module,'input_scale',None) is None,
+                          module.in_features,module.out_features) for name,module in targets]
+            descriptor = self.layout.__dict__.get('quantize')
+            if not isinstance(descriptor,classmethod):
+                raise RuntimeError('sp_amax_quantize_descriptor_changed')
+            if not _SP_NVFP4_LOCK.acquire(blocking=False):
+                raise RuntimeError('sp_amax_concurrent_scope_rejected')
+            self.locked = True
+        except Exception as exc:
+            error = type(exc).__name__
+            signature = []
+        replies = [None] * self.ctx.world
+        try:
+            self.dist.all_gather_object(replies, {'error':error,'signature':signature}, group=self.ctx.group)
+            if error or any(reply != {'error':None,'signature':signature} for reply in replies):
+                raise RuntimeError('sp_amax_rank_inventory_mismatch')
+            self.descriptor = descriptor
+            self.original_quantize = descriptor.__get__(None,self.layout)
+            self.targets = targets
+            self.dynamic = {name:getattr(module,'input_scale',None) is None for name,module in targets}
+            for name,module in targets:
+                original = module.forward
+                saved = module.__dict__.get('forward',_ABSENT)
+                self.saved.append((module,saved))
+                self.calls[name] = self.syncs[name] = 0
+                module.forward = types.MethodType(self._forward_wrapper(name,original),module)
+            scope = self
+            def quantize(cls,tensor,scale=None,stochastic_rounding=0,inplace_ops=False):
+                ticket = _SP_NVFP4_TICKET.get()
+                if (threading.get_ident() == scope.thread_id
+                    and ticket is not None and ticket['scope'] is scope and scale is None
+                    and stochastic_rounding == 0):
+                    if ticket['consumed']:
+                        raise RuntimeError('sp_amax_second_dynamic_quantization_rejected')
+                    if tensor.dim() != 2 or tensor.shape[0] != scope.ctx.local:
+                        raise RuntimeError('sp_amax_input_row_scope_changed')
+                    ticket['consumed'] = True
+                    # Native amax is computed before padding, in input dtype.
+                    # MAX on that dtype preserves native division/rounding order.
+                    maximum = scope.torch.amax(tensor.abs())
+                    scope.dist.all_reduce(maximum,op=scope.dist.ReduceOp.MAX,group=scope.ctx.group)
+                    scale = maximum / (scope.quant_ops.ck.float_utils.F8_E4M3_MAX
+                                       * scope.quant_ops.ck.float_utils.F4_E2M1_MAX)
+                    scope.syncs[ticket['name']] += 1
+                return scope.original_quantize(tensor,scale=scale,
+                    stochastic_rounding=stochastic_rounding,inplace_ops=inplace_ops)
+            self.layout.quantize = classmethod(quantize)
+            self.entered = True
+            return self
+        except BaseException:
+            self._restore()
+            raise
+
+    def _forward_wrapper(self,name,original):
+        def forward(module,input,*args,**kwargs):
+            if threading.get_ident() != self.thread_id:
+                return original(input,*args,**kwargs)
+            self.calls[name] += 1
+            if self.calls[name] != 1:
+                raise RuntimeError('sp_amax_repeated_target_forward_rejected')
+            # Preserve fixed input_scale exactly; do not reinterpret floats/tensors.
+            if not self.dynamic[name]:
+                return original(input,*args,**kwargs)
+            if (getattr(module,'input_scale',None) is not None or input.requires_grad
+                or isinstance(input,self.quant_ops.QuantizedTensor)):
+                raise RuntimeError('sp_amax_dynamic_inference_guard_changed')
+            ticket = {'scope':self,'name':name,'consumed':False}
+            token = _SP_NVFP4_TICKET.set(ticket)
+            try:
+                output = original(input,*args,**kwargs)
+                if not ticket['consumed']:
+                    raise RuntimeError('sp_amax_input_quantization_not_observed')
+                return output
+            finally:
+                _SP_NVFP4_TICKET.reset(token)
+        return forward
+
+    def _restore(self):
+        # Restore descriptors, not bound-function substitutes.
+        if self.entered:
+            self.layout.quantize = self.descriptor
+            self.entered = False
+        for module,saved in reversed(self.saved):
+            if saved is _ABSENT:
+                delattr(module,'forward')
+            else:
+                module.forward = saved
+        self.saved.clear()
+        if getattr(self,'locked',False):
+            self.locked = False
+            _SP_NVFP4_LOCK.release()
+
+    def __exit__(self,exc_type,exc,tb):
+        try:
+            if exc_type is None:
+                expected = {name:int(self.dynamic[name]) for name,_ in self.targets}
+                if any(n != 1 for n in self.calls.values()) or self.syncs != expected:
+                    raise RuntimeError('sp_amax_forward_sync_counts_mismatch')
+        finally:
+            self._restore()
+        return False
+
+    def counts(self):
+        return {'target_forwards':sum(self.calls.values()),'activation_syncs':sum(self.syncs.values()),
+                'per_block':[sum(n for name,n in self.syncs.items() if name.startswith(f'blocks.{i}.'))
+                             for i in range(50)]}
+
+# END reviewed SP2 activation amax scope
 
 PROFILE_OPS = bool(os.environ.get("MINIMAX_SP_PROFILE_OPS"))
 _prof_acc = {}
@@ -370,10 +552,19 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
         _prof_acc["pre"] = time.perf_counter() - t_fwd
 
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(dit.blocks), device, transformer_options)
-    for i, block in enumerate(dit.blocks):
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
-        transformer_options["block_index"] = i
-        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)
+    # BEGIN reviewed SP2 activation amax loop
+    scale_context = (SPNVFP4AmaxScope(dit, ctx, torch_module=torch, dist_module=dist,
+                                    quant_ops=comfy.quant_ops) if ctx.world == 2 else nullcontext())
+    with scale_context as scale_scope:
+        for i, block in enumerate(dit.blocks):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
+            transformer_options["block_index"] = i
+            h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)
+    if ctx.world == 2 and os.environ.get("MINIMAX_SP_VERIFY") == "1":
+        counts = scale_scope.counts()
+        logging.info("[minimax_sp][amax_sync] rank=%d target_forwards=%d activation_syncs=%d per_block=%s",
+                     rank, counts["target_forwards"], counts["activation_syncs"], counts["per_block"])
+    # END reviewed SP2 activation amax loop
     comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
 
     def counts_for(seg):
