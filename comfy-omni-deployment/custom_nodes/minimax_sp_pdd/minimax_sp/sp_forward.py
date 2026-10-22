@@ -394,16 +394,20 @@ FULL_M_ERROR_CODES = ("full_m_scope_invalid", "full_m_input_invalid", "full_m_me
 
 
 def full_m_installation_vote(trace, ctx):
-    replay = getattr(trace, "replay", None)
-    probe = getattr(replay, "full_m", None)
-    ready = (not trace.errors and replay is not None and replay.installed
-             and replay.error_code is None and probe is not None and probe.ctx is ctx)
+    scope = getattr(trace, "all_out_full_m", None)
+    try:
+        ready = not trace.errors and scope is not None and scope.ctx is ctx and scope.ready()
+    except Exception:
+        ready = False
     flag = torch.tensor([int(ready)], dtype=torch.int32, device="cuda:0")
     dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)
+    if scope is not None:
+        scope.installation_ballot_count += 1
     if not bool(flag.item()):
         logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=installation code=full_m_scope_invalid", ctx.rank)
         raise RuntimeError("MiniMax SP full-M diagnostic installation rejected")
-    probe.installation_verified = True
+    for probe in scope.probes.values():
+        probe.installation_verified = True
 
 
 def _full_m_outside_zero(buffers, start, stop):
@@ -437,8 +441,9 @@ class FullMProjection:
     or execution is fatal for the diagnostic; no smaller-M fallback is performed.
     Neither the native oracle nor the world1 mirror creates this object.
     """
-    def __init__(self, ctx):
+    def __init__(self, ctx, block=34):
         self.ctx = ctx
+        self.block = block
         self.calls = self.ballots = 0
         self.record = None
         self.installation_verified = False
@@ -463,6 +468,7 @@ class FullMProjection:
         try:
             try:
                 if (not self.installation_verified or ctx.world != 2 or ctx.rank not in (0, 1) or self.calls != 1
+                        or type(self.block) is not int or self.block not in range(50)
                         or ctx.seq_len != 45167 or ctx.splits != [22584, 22583]
                         or (ctx.start, ctx.stop) != ((0, 22584) if ctx.rank == 0 else (22584, 45167))):
                     raise ValueError("scope")
@@ -506,8 +512,9 @@ class FullMProjection:
                     global_start=ctx.start, global_stop=ctx.stop, output_cols=5376)
                 crop_sha = streamed_tensor_sha256(crop, tensor_global_start=ctx.start,
                     global_start=ctx.start, global_stop=ctx.stop)["sha256"]
-                self.record = {"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": ctx.rank,
-                    "scope": "verify_first_forward_only", "applied": True, "call_count": self.calls,
+                self.record = {"schema_version": 1, "block": self.block, "point": "attn.out_proj", "rank": ctx.rank,
+                    "scope": "verify_first_forward_all_out_proj", "applied": True, "call_count": self.calls,
+                    "native_quant_comparison_available": self.block == 34,
                     "global_start": ctx.start, "global_stop": ctx.stop, "local_logical_rows": ctx.local,
                     "source_padded_rows": source["padded_rows"], "full_logical_rows": ctx.seq_len,
                     "full_padded_rows": executed["padded_rows"], "input_width": 7168, "output_width": 5376,
@@ -533,25 +540,167 @@ class FullMProjection:
             del full_output, full_input, buffers
 
 
+class AllOutFullM:
+    """Verify-only ownership of 50 out_proj probes; block34 shares Replay's wrapper.
+
+    Post hashes observe each actual module return before residual updates. They
+    never stand in for a block-exit hash or a native quantization comparison.
+    """
+    def __init__(self, dit, ctx, replay):
+        self.dit, self.ctx, self.replay = dit, ctx, replay
+        self.probes = {index: FullMProjection(ctx, block=index) for index in range(50)}
+        self.probes[34] = replay.full_m
+        self.wrappers, self.handles, self.post_hashes = {}, [], {}
+        self.errors = []
+        self.installed = False
+        self.entered = False
+        self.installation_ballot_count = 0
+
+    def __enter__(self):
+        if self.entered:
+            raise RuntimeError("full_m_scope_reentry")
+        self.entered = True
+        try:
+            if (len(self.dit.blocks) != 50 or self.ctx.world != 2 or self.ctx.rank not in (0, 1)
+                    or self.replay.module is not self.dit.blocks[34].attn.out_proj
+                    or not self.replay.installed or self.replay.error_code is not None
+                    or self.replay.full_m is None):
+                raise RuntimeError("full_m_scope_invalid")
+            self.thread = threading.get_ident()
+            for index, block in enumerate(self.dit.blocks):
+                module = block.attn.out_proj
+                if (module.in_features != 7168 or module.out_features != 5376
+                        or getattr(module, "pre_quant_scale", None) is not None
+                        or getattr(module, "input_scale", None) is not None
+                        or getattr(module, "quant_format", None) != "nvfp4"
+                        or getattr(module, "layout_type", None) != "TensorCoreNVFP4Layout"
+                        or getattr(module, "_full_precision_mm", False)
+                        or getattr(module, "comfy_force_cast_weights", False)
+                        or getattr(module, "weight_function", ()) or getattr(module, "bias_function", ())):
+                    raise RuntimeError("full_m_scope_invalid")
+                if index != 34:
+                    previous = vars(module).get("_forward", _ABSENT)
+                    original = module._forward
+                    probe = self.probes[index]
+                    def wrapped(qinput, weight, bias, target=probe, saved=original):
+                        # No BF16 input or cast-weight lifetime is extended. The
+                        # enclosing Linear.forward still owns its cast context.
+                        return target.execute(saved, qinput, weight, bias)
+                    self.wrappers[index] = (module, previous, wrapped)
+                    module._forward = wrapped
+                def post(_module, _inputs, output, target=index):
+                    self._capture_post(target, output)
+                self.handles.append(module.register_forward_hook(post))
+            self.installed = True
+        except Exception:
+            self.errors.append("full_m_scope_install_failed")
+            self.__exit__(None, None, None)
+        return self
+
+    def ready(self):
+        return (self.installed and not self.errors and len(self.handles) == 50
+                and set(self.probes) == set(range(50)) and set(self.wrappers) == set(range(50)) - {34}
+                and self.replay.installed and self.replay.error_code is None
+                and self.replay.module._forward is self.replay.wrapped
+                and self.replay.full_m is self.probes[34]
+                and all(probe.ctx is self.ctx and probe.block == index
+                        for index, probe in self.probes.items())
+                and all(module._forward is wrapped for module, _previous, wrapped in self.wrappers.values()))
+
+    def _capture_post(self, block, output):
+        try:
+            if (threading.get_ident() != self.thread or block in self.post_hashes
+                    or self.probes[block].record is None
+                    or list(output.shape) != [self.ctx.local, 5376]):
+                raise RuntimeError("full_m_post_capture_invalid")
+            digest = streamed_tensor_sha256(output, tensor_global_start=self.ctx.start,
+                global_start=self.ctx.start, global_stop=self.ctx.stop)["sha256"]
+            if digest != self.probes[block].record["crop_sha256"]:
+                raise RuntimeError("full_m_post_crop_mismatch")
+            self.post_hashes[block] = digest
+            self.probes[block].record["returned_post_hook_sha256"] = digest
+        except Exception:
+            self.errors.append("full_m_post_capture_invalid")
+
+    def __exit__(self, _kind, _value, _traceback):
+        # Restore only wrappers installed by this scope; block34 belongs to the
+        # existing Replay owner and is restored by that owner's finally path.
+        for module, previous, wrapped in reversed(list(self.wrappers.values())):
+            try:
+                if module._forward is not wrapped:
+                    raise RuntimeError("full_m_scope_restore_failed")
+                if previous is _ABSENT:
+                    delattr(module, "_forward")
+                else:
+                    module._forward = previous
+            except Exception:
+                self.errors.append("full_m_scope_restore_failed")
+        self.wrappers.clear()
+        while self.handles:
+            try:
+                self.handles.pop().remove()
+            except Exception:
+                self.errors.append("full_m_scope_restore_failed")
+        self.installed = False
+        return False
+
+    def packet(self):
+        return {"records": [self.probes[index].record for index in range(50)],
+                "post_hashes": dict(self.post_hashes), "errors": list(self.errors),
+                "scope": {"schema_version": 1, "rank": self.ctx.rank, "target_count": len(self.probes),
+                    "applied_count": sum(probe.record is not None for probe in self.probes.values()),
+                    "installation_ballot_count": self.installation_ballot_count,
+                    "target_ballot_count": sum(probe.ballots for probe in self.probes.values()),
+                    "total_ballot_count": self.installation_ballot_count + sum(probe.ballots for probe in self.probes.values()),
+                    "scope": "verify_first_forward_all_out_proj", "formal_eligible": False,
+                    "native_oracle_changed": False}}
+
+
 def projection_full_m_summary(packets, native):
     rows = []
-    if native.get("projection_replay", {}).get("full_m") is not None:
+    if native.get("all_out_full_m") is not None or native.get("projection_replay", {}).get("full_m") is not None:
         raise RuntimeError("full_m_native_intervention_rejected")
+    if not isinstance(packets, list) or len(packets) != 2:
+        raise RuntimeError("full_m_diagnostic_packet_incomplete")
     for rank, packet in enumerate(packets):
-        row = packet.get("projection_replay", {}).get("full_m")
-        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("applied") is not True
-                or row.get("scope") != "verify_first_forward_only" or row.get("call_count") != 1
-                or row.get("ballot_count") != 2 or row.get("formal_eligible") is not False
-                or row.get("installation_ballot_count") != 1
-                or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]
-                or row.get("source_local_input") != row.get("executed_retained_input")
-                or row.get("outside_window_zero") is not True):
+        scope = packet.get("all_out_full_m")
+        if (not isinstance(scope, dict) or scope.get("errors") or len(scope.get("records", [])) != 50
+                or set(scope.get("post_hashes", {})) != set(range(50))):
             raise RuntimeError("full_m_diagnostic_packet_incomplete")
-        digest = packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]
-        if row.get("crop_sha256") != digest:
-            raise RuntimeError("full_m_returned_crop_hash_mismatch")
+        for block, row in enumerate(scope["records"]):
+            if (not isinstance(row, dict) or row.get("rank") != rank or row.get("block") != block
+                    or row.get("applied") is not True or row.get("scope") != "verify_first_forward_all_out_proj"
+                    or row.get("call_count") != 1 or row.get("ballot_count") != 2
+                    or row.get("formal_eligible") is not False or row.get("installation_ballot_count") != 1
+                    or row.get("native_quant_comparison_available") is not (block == 34)
+                    or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]
+                    or row.get("source_local_input") != row.get("executed_retained_input")
+                    or row.get("outside_window_zero") is not True):
+                raise RuntimeError("full_m_diagnostic_packet_incomplete")
+            digest = scope["post_hashes"][block]
+            if row.get("crop_sha256") != digest or row.get("returned_post_hook_sha256") != digest:
+                raise RuntimeError("full_m_returned_crop_hash_mismatch")
+            if block == 34 and (row != packet["projection_replay"]["full_m"]
+                    or digest != packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]):
+                raise RuntimeError("full_m_returned_crop_hash_mismatch")
+            rows.append(row)
+    return rows
+
+
+def projection_full_m_scope_summary(packets, native):
+    # Revalidate all per-target evidence before describing aggregate coverage.
+    projection_full_m_summary(packets, native)
+    rows = []
+    for rank, packet in enumerate(packets):
+        row = packet["all_out_full_m"].get("scope")
+        expected = {"schema_version": 1, "rank": rank, "target_count": 50, "applied_count": 50,
+            "installation_ballot_count": 1, "target_ballot_count": 100, "total_ballot_count": 101,
+            "scope": "verify_first_forward_all_out_proj", "formal_eligible": False, "native_oracle_changed": False}
+        if row != expected:
+            raise RuntimeError("full_m_scope_count_invalid")
         rows.append(row)
     return rows
+
 # END reviewed verify-only full-M projection probe
 
 
@@ -760,7 +909,7 @@ def stored_head_metadata(final_layer):
 
 
 class Block0Trace:
-    """Diagnostic CPU samples, plus an explicit SP-only block34 full-M probe.
+    """Diagnostic CPU samples, plus SP-only full-M probes on all 50 out_proj modules.
 
     Block34 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
     before native in-place RoPE/residual updates can change those rows. The
@@ -780,6 +929,7 @@ class Block0Trace:
         self.projection_hashes = {}
         self.entered = False
         self.replay = None
+        self.all_out_full_m = None
 
     def _capture(self, point, tensor):
         try:
@@ -821,6 +971,9 @@ class Block0Trace:
             self.replay = ProjectionReplay(block.attn.out_proj, rank=self.rank, start=self.start,
                                            stop=self.stop, windows=self.hash_windows, full_m_ctx=self.sp_ctx)
             self.replay.__enter__()
+            if self.sp_ctx is not None:
+                self.all_out_full_m = AllOutFullM(self.dit, self.sp_ctx, self.replay)
+                self.all_out_full_m.__enter__()
             for name, module in (("attn.qkv_proj", block.attn.qkv_proj),
                                  ("attn.out_proj", block.attn.out_proj),
                                  ("mlp.fc1", block.mlp.fc1), ("mlp.fc2", block.mlp.fc2)):
@@ -842,6 +995,8 @@ class Block0Trace:
         return self
 
     def _remove(self):
+        if self.all_out_full_m is not None:
+            self.all_out_full_m.__exit__(None, None, None)
         if self.replay is not None:
             self.replay.__exit__(None, None, None)
         while self.handles:
@@ -861,7 +1016,8 @@ class Block0Trace:
                 "entries": self.entries, "head_metadata": self.head_metadata,
                 "head_errors": list(self.head_errors), "full_hashes": self.full_hashes,
                 "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes,
-                "projection_replay": None if self.replay is None else self.replay.packet()}
+                "projection_replay": None if self.replay is None else self.replay.packet(),
+                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet()}
 
     def capture_head_metadata(self, final_layer):
         try:

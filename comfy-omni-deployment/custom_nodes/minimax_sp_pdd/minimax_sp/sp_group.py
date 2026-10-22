@@ -396,6 +396,9 @@ class SPGroup:
                         full_m_rows = spf.projection_full_m_summary(packets, native_trace.packet())
                         for row in full_m_rows:
                             logging.info("[minimax_sp][projection_full_m] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        full_m_scopes = spf.projection_full_m_scope_summary(packets, native_trace.packet())
+                        for row in full_m_scopes:
+                            logging.info("[minimax_sp][projection_full_m_scope] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                         if not replay_summary["complete"]:
                             trace_error = "ProjectionReplayIncomplete"
                     except Exception as exc:

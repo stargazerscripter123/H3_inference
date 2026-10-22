@@ -8,8 +8,8 @@
   "files": {
     "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
     "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
-    "minimax_sp/sp_forward.py": "efb27d90f0e1ee3491d6e7a65408c1a81728066c33178673288f57ee0d38d659",
-    "minimax_sp/sp_group.py": "192dbbff6f74d35a28c494d33ecb492f837687cb8401b896d04f07c4ce7601c9",
+    "minimax_sp/sp_forward.py": "985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb",
+    "minimax_sp/sp_group.py": "5d081e141d9892d172d0065f6f6fa1acd33259ae8752c165185fe16f1332b801",
     "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
     "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
@@ -24,10 +24,10 @@
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
   },
   "local_patch": {
-    "id": "omni-sp2-global-amax-full-m-projection-probe-v10",
+    "id": "omni-sp2-global-amax-all-out-full-m-probe-v11",
     "path": "minimax_sp/sp_forward.py",
     "source_sha256": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
-    "patched_sha256": "efb27d90f0e1ee3491d6e7a65408c1a81728066c33178673288f57ee0d38d659",
+    "patched_sha256": "985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb",
     "description": "Use the actual returned video/audio tensor width for PDD final all-gather, and use the public all_gather_into_tensor API supported by the installed PyTorch 2.12.0+cu130 runtime. Padding, rank order and float32 gather buffers are unchanged.",
     "changes": [
       "video gather out_dim: dit.final_layer.video_out.out_features -> v_local.shape[-1]",
@@ -40,7 +40,8 @@
       "Verification only: focus projection samples on block36 and stream complete layer-output byte hashes per global rank window",
       "Verification only: focus projection samples and complete window hashes on block34, retaining all50 layer hashes and the same single packet gather",
       "Verification only: compare actual NVFP4 inputs and cast weights at block34 out_proj, then replay native full-M projection with two actual shard-M windows using the same cast weight/bias and fixed input scale; original native result and gate unchanged",
-      "Diagnostic-only first SP2 forward block34 out_proj: preserve native full-M packed layout with original rank row offsets and zero other rows, clone returned rank crop; formal use and continuation beyond the first diagnostic step are rejected."
+      "Diagnostic-only first SP2 forward block34 out_proj: preserve native full-M packed layout with original rank row offsets and zero other rows, clone returned rank crop; formal use and continuation beyond the first diagnostic step are rejected.",
+      "Diagnostic-only first SP2 forward: apply packed full-M padding to all50 attn.out_proj using one shared installation ballot and 100 target ballots per rank. Bind every returned crop with an independent module post-hook; native oracle, all other projections and original threshold remain unchanged."
     ],
     "actual_model_contract": {
       "pdd_steps": 32,
@@ -56,10 +57,10 @@
       "fixed input scales",
       "native quantization rounding order"
     ],
-    "previous_patched_sha256": "73b12335ed6ad131285bfb746a13661ce7d206c81a15752db43c8e1b212001e4"
+    "previous_patched_sha256": "efb27d90f0e1ee3491d6e7a65408c1a81728066c33178673288f57ee0d38d659"
   },
   "validation": {
-    "cpu_shape_and_ast_tests": 80,
+    "cpu_shape_and_ast_tests": 87,
     "gpu_tested": false,
     "full_forward_parity_tested": false,
     "full_forward_parity_passed": false,
@@ -68,7 +69,7 @@
       "threshold": 0.001,
       "formal_outputs": 0
     },
-    "scope": "Prior same-GPU shard-M replay reproduced actual SP outputs with matching quantized input and actual cast weights; full-M padding experiment is not yet GPU validated and cannot be used for formal generation.",
+    "scope": "Block34 full-M intervention eliminated its complete projection difference; remaining first layer differences occur at rank0 block35 and rank1 block36. All50 out_proj full-M experiment awaits GPU validation and remains ineligible for formal generation.",
     "previous_global_amax_gpu_result": {
       "video_relative_max": 0.103515625,
       "audio_relative_max": 0.044378698,
@@ -109,13 +110,28 @@
       "native_free_bytes": 2417229824,
       "backend_verified": false,
       "native_parity_passed": false
+    },
+    "previous_block34_full_m_intervention": {
+      "projection_hash_rows": 16,
+      "all_projection_hashes_match": true,
+      "block34_exit_both_ranks_matches": true,
+      "first_mismatched_layer_by_rank": {
+        "0": 35,
+        "1": 36
+      },
+      "video_relative": 0.10453869,
+      "audio_relative": 0.039940828,
+      "world1_video_max_abs": 0.0,
+      "world1_audio_max_abs": 0.0,
+      "native_parity_passed": false,
+      "formal_outputs": 0
     }
   },
-  "scope": "Diagnostic-only block34 out_proj packed full-M experiment. Formal SP use is rejected; even native parity success stops after one verified step and cannot authorize formal generation.",
+  "scope": "Diagnostic-only all50 out_proj packed full-M experiment. Other projections and native oracle are unchanged. Formal SP use is rejected; even first-step parity success stops without generation.",
   "diagnostic_patch": {
     "path": "minimax_sp/sp_group.py",
     "source_sha256": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
-    "patched_sha256": "192dbbff6f74d35a28c494d33ecb492f837687cb8401b896d04f07c4ce7601c9",
+    "patched_sha256": "5d081e141d9892d172d0065f6f6fa1acd33259ae8752c165185fe16f1332b801",
     "scope": "Verification-only original native gate and failed-parity world1 mirror; full-M diagnostic evidence logged separately. Formal requests are rejected before group creation; after successful first-step parity this diagnostic-only version also stops without generating a video."
   },
   "activation_scale_patch": {
@@ -302,8 +318,7 @@
   "diagnostic_probe_only": true,
   "formal_eligible": false,
   "full_m_projection_probe": {
-    "scope": "verify first SP2 forward only; both ranks, block34 attn.out_proj",
-    "block": 34,
+    "scope": "verify first SP2 forward only; both ranks, all50 attn.out_proj",
     "point": "attn.out_proj",
     "logical_full_rows": 45167,
     "padded_full_rows": 45168,
@@ -330,9 +345,67 @@
     "limitations": "Same dimensions and unchanged local packed values do not guarantee kernel identity or full-model parity. Timing is diagnostic only.",
     "diagnostic_only_collectives": {
       "installation_ballot_before_blocks": 1,
-      "target_preparation_ballot": 1,
-      "target_execution_ballot": 1,
+      "target_preparation_ballot": 50,
+      "target_execution_ballot": 50,
+      "total_per_rank": 101,
       "expected_activation_amax_syncs_per_rank_unchanged": 200
-    }
+    },
+    "blocks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49
+    ],
+    "rows": 100,
+    "native_quant_comparison_blocks": [
+      34
+    ],
+    "returned_output_binding": "Independent actual out_proj module post-hook hash equals cloned crop SHA. Only block34 also binds existing native projection comparison; other out_proj crops are not compared to block residual-output hashes."
   }
 }

@@ -23,10 +23,25 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+ALL_OUT_FULL_M_REVERSE_EDITS = {'sp_forward.py': [(396, 401, '    scope = getattr(trace, "all_out_full_m", None)\n    try:\n        ready = not trace.errors and scope is not None and scope.ctx is ctx and scope.ready()\n    except Exception:\n        ready = False\n', '    replay = getattr(trace, "replay", None)\n    probe = getattr(replay, "full_m", None)\n    ready = (not trace.errors and replay is not None and replay.installed\n             and replay.error_code is None and probe is not None and probe.ctx is ctx)\n'), (403, 405, '    if scope is not None:\n        scope.installation_ballot_count += 1\n', ''), (408, 410, '    for probe in scope.probes.values():\n        probe.installation_verified = True\n', '    probe.installation_verified = True\n'), (443, 444, '    def __init__(self, ctx, block=34):\n', '    def __init__(self, ctx):\n'), (445, 446, '        self.block = block\n', ''), (470, 471, '                        or type(self.block) is not int or self.block not in range(50)\n', ''), (514, 517, '                self.record = {"schema_version": 1, "block": self.block, "point": "attn.out_proj", "rank": ctx.rank,\n                    "scope": "verify_first_forward_all_out_proj", "applied": True, "call_count": self.calls,\n                    "native_quant_comparison_available": self.block == 34,\n', '                self.record = {"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": ctx.rank,\n                    "scope": "verify_first_forward_only", "applied": True, "call_count": self.calls,\n'), (542, 658, 'class AllOutFullM:\n    """Verify-only ownership of 50 out_proj probes; block34 shares Replay\'s wrapper.\n\n    Post hashes observe each actual module return before residual updates. They\n    never stand in for a block-exit hash or a native quantization comparison.\n    """\n    def __init__(self, dit, ctx, replay):\n        self.dit, self.ctx, self.replay = dit, ctx, replay\n        self.probes = {index: FullMProjection(ctx, block=index) for index in range(50)}\n        self.probes[34] = replay.full_m\n        self.wrappers, self.handles, self.post_hashes = {}, [], {}\n        self.errors = []\n        self.installed = False\n        self.entered = False\n        self.installation_ballot_count = 0\n\n    def __enter__(self):\n        if self.entered:\n            raise RuntimeError("full_m_scope_reentry")\n        self.entered = True\n        try:\n            if (len(self.dit.blocks) != 50 or self.ctx.world != 2 or self.ctx.rank not in (0, 1)\n                    or self.replay.module is not self.dit.blocks[34].attn.out_proj\n                    or not self.replay.installed or self.replay.error_code is not None\n                    or self.replay.full_m is None):\n                raise RuntimeError("full_m_scope_invalid")\n            self.thread = threading.get_ident()\n            for index, block in enumerate(self.dit.blocks):\n                module = block.attn.out_proj\n                if (module.in_features != 7168 or module.out_features != 5376\n                        or getattr(module, "pre_quant_scale", None) is not None\n                        or getattr(module, "input_scale", None) is not None\n                        or getattr(module, "quant_format", None) != "nvfp4"\n                        or getattr(module, "layout_type", None) != "TensorCoreNVFP4Layout"\n                        or getattr(module, "_full_precision_mm", False)\n                        or getattr(module, "comfy_force_cast_weights", False)\n                        or getattr(module, "weight_function", ()) or getattr(module, "bias_function", ())):\n                    raise RuntimeError("full_m_scope_invalid")\n                if index != 34:\n                    previous = vars(module).get("_forward", _ABSENT)\n                    original = module._forward\n                    probe = self.probes[index]\n                    def wrapped(qinput, weight, bias, target=probe, saved=original):\n                        # No BF16 input or cast-weight lifetime is extended. The\n                        # enclosing Linear.forward still owns its cast context.\n                        return target.execute(saved, qinput, weight, bias)\n                    self.wrappers[index] = (module, previous, wrapped)\n                    module._forward = wrapped\n                def post(_module, _inputs, output, target=index):\n                    self._capture_post(target, output)\n                self.handles.append(module.register_forward_hook(post))\n            self.installed = True\n        except Exception:\n            self.errors.append("full_m_scope_install_failed")\n            self.__exit__(None, None, None)\n        return self\n\n    def ready(self):\n        return (self.installed and not self.errors and len(self.handles) == 50\n                and set(self.probes) == set(range(50)) and set(self.wrappers) == set(range(50)) - {34}\n                and self.replay.installed and self.replay.error_code is None\n                and self.replay.module._forward is self.replay.wrapped\n                and self.replay.full_m is self.probes[34]\n                and all(probe.ctx is self.ctx and probe.block == index\n                        for index, probe in self.probes.items())\n                and all(module._forward is wrapped for module, _previous, wrapped in self.wrappers.values()))\n\n    def _capture_post(self, block, output):\n        try:\n            if (threading.get_ident() != self.thread or block in self.post_hashes\n                    or self.probes[block].record is None\n                    or list(output.shape) != [self.ctx.local, 5376]):\n                raise RuntimeError("full_m_post_capture_invalid")\n            digest = streamed_tensor_sha256(output, tensor_global_start=self.ctx.start,\n                global_start=self.ctx.start, global_stop=self.ctx.stop)["sha256"]\n            if digest != self.probes[block].record["crop_sha256"]:\n                raise RuntimeError("full_m_post_crop_mismatch")\n            self.post_hashes[block] = digest\n            self.probes[block].record["returned_post_hook_sha256"] = digest\n        except Exception:\n            self.errors.append("full_m_post_capture_invalid")\n\n    def __exit__(self, _kind, _value, _traceback):\n        # Restore only wrappers installed by this scope; block34 belongs to the\n        # existing Replay owner and is restored by that owner\'s finally path.\n        for module, previous, wrapped in reversed(list(self.wrappers.values())):\n            try:\n                if module._forward is not wrapped:\n                    raise RuntimeError("full_m_scope_restore_failed")\n                if previous is _ABSENT:\n                    delattr(module, "_forward")\n                else:\n                    module._forward = previous\n            except Exception:\n                self.errors.append("full_m_scope_restore_failed")\n        self.wrappers.clear()\n        while self.handles:\n            try:\n                self.handles.pop().remove()\n            except Exception:\n                self.errors.append("full_m_scope_restore_failed")\n        self.installed = False\n        return False\n\n    def packet(self):\n        return {"records": [self.probes[index].record for index in range(50)],\n                "post_hashes": dict(self.post_hashes), "errors": list(self.errors),\n                "scope": {"schema_version": 1, "rank": self.ctx.rank, "target_count": len(self.probes),\n                    "applied_count": sum(probe.record is not None for probe in self.probes.values()),\n                    "installation_ballot_count": self.installation_ballot_count,\n                    "target_ballot_count": sum(probe.ballots for probe in self.probes.values()),\n                    "total_ballot_count": self.installation_ballot_count + sum(probe.ballots for probe in self.probes.values()),\n                    "scope": "verify_first_forward_all_out_proj", "formal_eligible": False,\n                    "native_oracle_changed": False}}\n\n\n', ''), (660, 661, '    if native.get("all_out_full_m") is not None or native.get("projection_replay", {}).get("full_m") is not None:\n', '    if native.get("projection_replay", {}).get("full_m") is not None:\n'), (662, 664, '    if not isinstance(packets, list) or len(packets) != 2:\n        raise RuntimeError("full_m_diagnostic_packet_incomplete")\n', ''), (665, 668, '        scope = packet.get("all_out_full_m")\n        if (not isinstance(scope, dict) or scope.get("errors") or len(scope.get("records", [])) != 50\n                or set(scope.get("post_hashes", {})) != set(range(50))):\n', '        row = packet.get("projection_replay", {}).get("full_m")\n        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("applied") is not True\n                or row.get("scope") != "verify_first_forward_only" or row.get("call_count") != 1\n                or row.get("ballot_count") != 2 or row.get("formal_eligible") is not False\n                or row.get("installation_ballot_count") != 1\n                or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]\n                or row.get("source_local_input") != row.get("executed_retained_input")\n                or row.get("outside_window_zero") is not True):\n'), (669, 700, '        for block, row in enumerate(scope["records"]):\n            if (not isinstance(row, dict) or row.get("rank") != rank or row.get("block") != block\n                    or row.get("applied") is not True or row.get("scope") != "verify_first_forward_all_out_proj"\n                    or row.get("call_count") != 1 or row.get("ballot_count") != 2\n                    or row.get("formal_eligible") is not False or row.get("installation_ballot_count") != 1\n                    or row.get("native_quant_comparison_available") is not (block == 34)\n                    or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]\n                    or row.get("source_local_input") != row.get("executed_retained_input")\n                    or row.get("outside_window_zero") is not True):\n                raise RuntimeError("full_m_diagnostic_packet_incomplete")\n            digest = scope["post_hashes"][block]\n            if row.get("crop_sha256") != digest or row.get("returned_post_hook_sha256") != digest:\n                raise RuntimeError("full_m_returned_crop_hash_mismatch")\n            if block == 34 and (row != packet["projection_replay"]["full_m"]\n                    or digest != packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]):\n                raise RuntimeError("full_m_returned_crop_hash_mismatch")\n            rows.append(row)\n    return rows\n\n\ndef projection_full_m_scope_summary(packets, native):\n    # Revalidate all per-target evidence before describing aggregate coverage.\n    projection_full_m_summary(packets, native)\n    rows = []\n    for rank, packet in enumerate(packets):\n        row = packet["all_out_full_m"].get("scope")\n        expected = {"schema_version": 1, "rank": rank, "target_count": 50, "applied_count": 50,\n            "installation_ballot_count": 1, "target_ballot_count": 100, "total_ballot_count": 101,\n            "scope": "verify_first_forward_all_out_proj", "formal_eligible": False, "native_oracle_changed": False}\n        if row != expected:\n            raise RuntimeError("full_m_scope_count_invalid")\n', '        digest = packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]\n        if row.get("crop_sha256") != digest:\n            raise RuntimeError("full_m_returned_crop_hash_mismatch")\n'), (702, 703, '\n', ''), (911, 912, '    """Diagnostic CPU samples, plus SP-only full-M probes on all 50 out_proj modules.\n', '    """Diagnostic CPU samples, plus an explicit SP-only block34 full-M probe.\n'), (931, 932, '        self.all_out_full_m = None\n', ''), (973, 976, '            if self.sp_ctx is not None:\n                self.all_out_full_m = AllOutFullM(self.dit, self.sp_ctx, self.replay)\n                self.all_out_full_m.__enter__()\n', ''), (997, 999, '        if self.all_out_full_m is not None:\n            self.all_out_full_m.__exit__(None, None, None)\n', ''), (1018, 1020, '                "projection_replay": None if self.replay is None else self.replay.packet(),\n                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet()}\n', '                "projection_replay": None if self.replay is None else self.replay.packet()}\n')], 'sp_group.py': [(398, 401, '                        full_m_scopes = spf.projection_full_m_scope_summary(packets, native_trace.packet())\n                        for row in full_m_scopes:\n                            logging.info("[minimax_sp][projection_full_m_scope] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
+ALL_OUT_FULL_M_PRIOR_SHA = {'sp_forward.py': 'efb27d90f0e1ee3491d6e7a65408c1a81728066c33178673288f57ee0d38d659', 'sp_group.py': '192dbbff6f74d35a28c494d33ecb492f837687cb8401b896d04f07c4ce7601c9'}
+
+def reverse_all_out_full_m(source, name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(ALL_OUT_FULL_M_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('all-out full-M reviewed block digest/source changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=ALL_OUT_FULL_M_PRIOR_SHA[name]:
+        raise AssertionError('all-out full-M reviewed block digest differs from single-target source')
+    return source
+
 FULL_M_REVERSE_EDITS = {'sp_forward.py': [(25, 26, 'import dataclasses\n', ''), (264, 557, '# BEGIN reviewed verify-only full-M projection probe\ndef _full_m_sizes(*, local_rows, full_rows, input_cols, global_start):\n    values = (local_rows, full_rows, input_cols, global_start)\n    if (any(type(n) is not int for n in values) or local_rows <= 0 or full_rows <= 0\n            or input_cols <= 0 or input_cols % 16 or global_start < 0\n            or global_start + local_rows > full_rows):\n        raise RuntimeError("full_m_geometry_invalid")\n    cols = input_cols // 16\n    padded_cols = (cols + 3) // 4 * 4\n    qrows = (full_rows + 15) // 16 * 16\n    srows = (full_rows + 127) // 128 * 128\n    # Conservative bound on simultaneous tile-sized reshape/copy intermediates.\n    scratch = 6 * 128 * padded_cols\n    return {"logical_rows": full_rows, "local_rows": local_rows,\n            "global_start": global_start, "global_stop": global_start + local_rows,\n            "input_cols": input_cols, "logical_scale_cols": cols,\n            "qdata_shape": [qrows, input_cols // 2],\n            "block_scale_shape": [srows, padded_cols],\n            "qdata_bytes": qrows * (input_cols // 2),\n            "block_scale_bytes": srows * padded_cols,\n            "layout_scratch_bound_bytes": scratch}\n\n\ndef nvfp4_full_m_budget(*, local_rows, full_rows, input_cols, global_start,\n                       output_cols, workspace_bytes=33554432):\n    """Calculated additional buffers, not an allocator or measured free-memory gate."""\n    if (type(output_cols) is not int or output_cols <= 0\n            or type(workspace_bytes) is not int or workspace_bytes < 0):\n        raise RuntimeError("full_m_budget_invalid")\n    sizes = _full_m_sizes(local_rows=local_rows, full_rows=full_rows,\n                          input_cols=input_cols, global_start=global_start)\n    storage = sizes["qdata_bytes"] + sizes["block_scale_bytes"]\n    full_y = sizes["qdata_shape"][0] * output_cols * 2  # BF16 output; retain padded allocation.\n    crop = local_rows * output_cols * 2  # Clone required before full-Y can be released.\n    return {"schema_version": 1, "kind": "calculated_not_measured", **sizes,\n            "new_packed_storage_bytes": storage,\n            "helper_extra_bound_bytes": storage + sizes["layout_scratch_bound_bytes"],\n            "full_y_bf16_bytes": full_y, "crop_bf16_bytes": crop,\n            "workspace_bytes": workspace_bytes,\n            "conservative_additional_bytes": storage + sizes["layout_scratch_bound_bytes"]\n                + full_y + crop + workspace_bytes,\n            "excludes_existing_inputs_weights_allocator_other_kernels": True,\n            "bf16_full_x_bytes": 0, "measured_peak": False}\n\n\ndef _full_m_unblock_tile(tile, padded_cols):\n    a = tile.reshape(-1, 32, 4, 4).transpose(1, 2)\n    b = a.reshape(1, padded_cols // 4, 128, 4)\n    return b.permute(0, 2, 1, 3).reshape(128, padded_cols)\n\n\ndef _full_m_block_tile(tile, padded_cols):\n    a = tile.reshape(1, 128, padded_cols // 4, 4).permute(0, 2, 1, 3)\n    return a.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(128, padded_cols)\n\n\ndef nvfp4_full_m_zero_pad_storage(qdata, block_scale, scale, *, local_rows,\n                                full_rows, input_cols, global_start,\n                                allocation_limit_bytes):\n    """Return new packed buffers and the exact same scalar scale object.\n\n    Only source logical rows/columns are copied; all other target bytes are zero.\n    Work stays on the input device. No quantization/dequantization is performed.\n    The explicit limit bounds this helper\'s buffers only, not a following GEMM.\n    Caller must retain W/precision/global scale and separately prove full parity.\n    """\n    sizes = _full_m_sizes(local_rows=local_rows, full_rows=full_rows,\n                          input_cols=input_cols, global_start=global_start)\n    columns = sizes["logical_scale_cols"]\n    padded_cols = sizes["block_scale_shape"][1]\n    bound = sizes["qdata_bytes"] + sizes["block_scale_bytes"] + sizes["layout_scratch_bound_bytes"]\n    if type(allocation_limit_bytes) is not int or allocation_limit_bytes < bound:\n        raise RuntimeError("full_m_allocation_budget_insufficient")\n    if (not all(isinstance(tensor, torch.Tensor) for tensor in (qdata, block_scale, scale))\n            or qdata.dtype != torch.uint8 or block_scale.dtype != torch.float8_e4m3fn\n            or scale.dtype != torch.float32 or scale.numel() != 1\n            or qdata.ndim != 2 or block_scale.ndim != 2\n            or not all(tensor.is_contiguous() for tensor in (qdata, block_scale, scale))\n            or tuple(qdata.shape) != ((local_rows + 15) // 16 * 16, input_cols // 2)\n            or tuple(block_scale.shape) != ((local_rows + 127) // 128 * 128, padded_cols)\n            or not (qdata.device == block_scale.device == scale.device)\n            or any(tensor.requires_grad for tensor in (qdata, block_scale, scale))\n            or not bool(torch.isfinite(scale).all().item())\n            or not bool((scale >= 0).all().item())):\n        raise RuntimeError("full_m_storage_or_scale_invalid")\n    full_qdata = torch.zeros(tuple(sizes["qdata_shape"]), dtype=torch.uint8, device=qdata.device)\n    full_scales = torch.zeros(tuple(sizes["block_scale_shape"]), dtype=torch.uint8, device=qdata.device)\n    full_qdata[global_start:global_start + local_rows].copy_(qdata[:local_rows])\n    source_bytes = block_scale.view(torch.uint8)\n    global_stop = global_start + local_rows\n    for target_start in range((global_start // 128) * 128, global_stop, 128):\n        logical_tile = torch.zeros((128, padded_cols), dtype=torch.uint8, device=qdata.device)\n        overlap_start = max(global_start, target_start)\n        overlap_stop = min(global_stop, target_start + 128)\n        source_start, source_stop = overlap_start - global_start, overlap_stop - global_start\n        for source_tile_start in range((source_start // 128) * 128, source_stop, 128):\n            unblocked = _full_m_unblock_tile(source_bytes[source_tile_start:source_tile_start + 128], padded_cols)\n            first = max(source_start, source_tile_start)\n            last = min(source_stop, source_tile_start + 128)\n            target_first = global_start + first - target_start\n            logical_tile[target_first:target_first + last - first, :columns].copy_(\n                unblocked[first - source_tile_start:last - source_tile_start, :columns])\n            del unblocked\n        blocked = _full_m_block_tile(logical_tile, padded_cols)\n        full_scales[target_start:target_start + 128].copy_(blocked)\n        del blocked, logical_tile\n    return {"qdata": full_qdata, "block_scale": full_scales.view(torch.float8_e4m3fn),\n            "scale": scale, "metadata": {"schema_version": 1, **sizes,\n                "helper_extra_bound_bytes": bound, "scale_object_reused": True,\n                "outside_window_zero": True, "source_padding_copied": False,\n                "bf16_full_x_allocated": False, "gemm_executed": False,\n                "kernel_or_output_parity_verified": False}}\n\n\ndef nvfp4_full_m_crop_output(full_output, *, full_rows, global_start, global_stop, output_cols):\n    """Clone the original global window so the caller can release the full-Y storage."""\n    values = (full_rows, global_start, global_stop, output_cols)\n    if (any(type(n) is not int for n in values) or full_rows <= 0 or output_cols <= 0\n            or not 0 <= global_start < global_stop <= full_rows\n            or not isinstance(full_output, torch.Tensor) or full_output.dtype != torch.bfloat16\n            or tuple(full_output.shape) != (full_rows, output_cols)\n            or not full_output.is_contiguous() or full_output.requires_grad):\n        raise RuntimeError("full_m_output_crop_invalid")\n    return full_output[global_start:global_stop].clone(memory_format=torch.contiguous_format)\n\n\nFULL_M_DIAGNOSTIC_PROBE_ONLY = True\nFULL_M_ERROR_CODES = ("full_m_scope_invalid", "full_m_input_invalid", "full_m_memory_insufficient",\n                     "full_m_preparation_failed", "full_m_execution_failed", "full_m_peer_rejected")\n\n\ndef full_m_installation_vote(trace, ctx):\n    replay = getattr(trace, "replay", None)\n    probe = getattr(replay, "full_m", None)\n    ready = (not trace.errors and replay is not None and replay.installed\n             and replay.error_code is None and probe is not None and probe.ctx is ctx)\n    flag = torch.tensor([int(ready)], dtype=torch.int32, device="cuda:0")\n    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)\n    if not bool(flag.item()):\n        logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=installation code=full_m_scope_invalid", ctx.rank)\n        raise RuntimeError("MiniMax SP full-M diagnostic installation rejected")\n    probe.installation_verified = True\n\n\ndef _full_m_outside_zero(buffers, start, stop):\n    """Inspect actual new storage, including padding; no full-sized masks/copies."""\n    data = buffers["qdata"]\n    scales = buffers["block_scale"].view(torch.uint8)\n    columns = scales.shape[1]\n    if bool(torch.count_nonzero(data[:start]).item()) or bool(torch.count_nonzero(data[stop:]).item()):\n        return False\n    for first in range(0, scales.shape[0], 128):\n        last = first + 128\n        if last <= start or first >= stop:\n            if bool(torch.count_nonzero(scales[first:last]).item()):\n                return False\n        elif first < start or last > stop:\n            plain = _full_m_unblock_tile(scales[first:last], columns)\n            try:\n                left = max(0, start - first)\n                right = min(128, stop - first)\n                if bool(torch.count_nonzero(plain[:left]).item()) or bool(torch.count_nonzero(plain[right:]).item()):\n                    return False\n            finally:\n                del plain\n    return True\n\n\nclass FullMProjection:\n    """One verify-only SP target, entirely inside its original cast context.\n\n    The two ballots are at this same target on both ranks. A rejected preparation\n    or execution is fatal for the diagnostic; no smaller-M fallback is performed.\n    Neither the native oracle nor the world1 mirror creates this object.\n    """\n    def __init__(self, ctx):\n        self.ctx = ctx\n        self.calls = self.ballots = 0\n        self.record = None\n        self.installation_verified = False\n\n    def _vote(self, code, phase):\n        # Device choice is worker-local cuda:0 on both ranks, even if a malformed\n        # argument failed its validation; every rank still reaches the ballot.\n        flag = torch.tensor([int(code is None)], dtype=torch.int32, device="cuda:0")\n        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=self.ctx.group)\n        self.ballots += 1\n        if not bool(flag.item()):\n            safe_code = code if code in FULL_M_ERROR_CODES else "full_m_peer_rejected"\n            logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=%s code=%s",\n                         self.ctx.rank, phase, safe_code)\n            raise RuntimeError("MiniMax SP full-M diagnostic rejected")\n\n    def execute(self, original, qinput, weight, bias):\n        self.calls += 1\n        ctx = self.ctx\n        code = None\n        buffers = full_input = full_output = crop = None\n        try:\n            try:\n                if (not self.installation_verified or ctx.world != 2 or ctx.rank not in (0, 1) or self.calls != 1\n                        or ctx.seq_len != 45167 or ctx.splits != [22584, 22583]\n                        or (ctx.start, ctx.stop) != ((0, 22584) if ctx.rank == 0 else (22584, 45167))):\n                    raise ValueError("scope")\n                source = _replay_quantized_identity(qinput, tensor_global_start=ctx.start,\n                                                  windows=[(ctx.start, ctx.stop)])\n                if (source["shape"] != [ctx.local, 7168] or qinput._qdata.device.type != "cuda"\n                        or qinput._qdata.device.index != 0):\n                    raise ValueError("input")\n                weight_sha, bias_sha = _replay_weight_bias(weight, bias)\n                budget = nvfp4_full_m_budget(local_rows=ctx.local, full_rows=ctx.seq_len,\n                    input_cols=7168, global_start=ctx.start, output_cols=5376)\n                torch.cuda.synchronize(qinput._qdata.device)\n                free = int(torch.cuda.mem_get_info(qinput._qdata.device)[0])\n                reserved = int(torch.cuda.memory_reserved(qinput._qdata.device))\n                allocated = int(torch.cuda.memory_allocated(qinput._qdata.device))\n                if free < max(REPLAY_MINIMUM_FREE_BYTES, budget["conservative_additional_bytes"]):\n                    code = "full_m_memory_insufficient"\n                else:\n                    buffers = nvfp4_full_m_zero_pad_storage(qinput._qdata, qinput._params.block_scale,\n                        qinput._params.scale, local_rows=ctx.local, full_rows=ctx.seq_len,\n                        input_cols=7168, global_start=ctx.start,\n                        allocation_limit_bytes=budget["helper_extra_bound_bytes"])\n                    params = dataclasses.replace(qinput._params, orig_shape=(ctx.seq_len, 7168),\n                                                 block_scale=buffers["block_scale"])\n                    full_input = type(qinput)(buffers["qdata"], qinput._layout_cls, params)\n                    executed = _replay_quantized_identity(full_input, tensor_global_start=0,\n                                                         windows=[(ctx.start, ctx.stop)])\n                    outside_zero = _full_m_outside_zero(buffers, ctx.start, ctx.stop)\n                    if (params.scale is not qinput._params.scale or params.orig_dtype != qinput._params.orig_dtype\n                            or params.transposed != qinput._params.transposed\n                            or executed["windows"][0] != source["windows"][0] or not outside_zero):\n                        raise ValueError("retained_input")\n            except Exception:\n                code = code or "full_m_preparation_failed"\n            self._vote(code, "preparation")\n            try:\n                # This is the only target GEMM: preserve the actual cast W/B\n                # objects and the ordinary dispatcher; never call from_float.\n                full_output = original(full_input, weight, bias)\n                crop = nvfp4_full_m_crop_output(full_output, full_rows=ctx.seq_len,\n                    global_start=ctx.start, global_stop=ctx.stop, output_cols=5376)\n                crop_sha = streamed_tensor_sha256(crop, tensor_global_start=ctx.start,\n                    global_start=ctx.start, global_stop=ctx.stop)["sha256"]\n                self.record = {"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": ctx.rank,\n                    "scope": "verify_first_forward_only", "applied": True, "call_count": self.calls,\n                    "global_start": ctx.start, "global_stop": ctx.stop, "local_logical_rows": ctx.local,\n                    "source_padded_rows": source["padded_rows"], "full_logical_rows": ctx.seq_len,\n                    "full_padded_rows": executed["padded_rows"], "input_width": 7168, "output_width": 5376,\n                    "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",\n                    "source_local_input": source["windows"][0], "executed_retained_input": executed["windows"][0],\n                    "retained_input_match": True, "outside_window_zero": outside_zero,\n                    "source_weight": weight_sha, "source_bias": bias_sha,\n                    "scale_object_reused": params.scale is qinput._params.scale,\n                    "weight_object_reused": True, "bias_object_reused": True,\n                    "crop_sha256": crop_sha, "crop_shape": list(crop.shape), "crop_cloned": True,\n                    "minimum_free_bytes": REPLAY_MINIMUM_FREE_BYTES, "free_bytes": free,\n                    "reserved_bytes": reserved, "allocated_bytes": allocated,\n                    "calculated_additional_bytes": budget["conservative_additional_bytes"],\n                    "installation_ballot_count": 1,\n                    "backend_verified": False, "native_oracle_changed": False, "formal_eligible": False}\n            except Exception:\n                code = "full_m_execution_failed"\n            self._vote(code, "execution")\n            self.record["ballot_count"] = self.ballots\n            return crop\n        finally:\n            # crop owns separate storage; no caller keeps the full-M allocation.\n            del full_output, full_input, buffers\n\n\ndef projection_full_m_summary(packets, native):\n    rows = []\n    if native.get("projection_replay", {}).get("full_m") is not None:\n        raise RuntimeError("full_m_native_intervention_rejected")\n    for rank, packet in enumerate(packets):\n        row = packet.get("projection_replay", {}).get("full_m")\n        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("applied") is not True\n                or row.get("scope") != "verify_first_forward_only" or row.get("call_count") != 1\n                or row.get("ballot_count") != 2 or row.get("formal_eligible") is not False\n                or row.get("installation_ballot_count") != 1\n                or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]\n                or row.get("source_local_input") != row.get("executed_retained_input")\n                or row.get("outside_window_zero") is not True):\n            raise RuntimeError("full_m_diagnostic_packet_incomplete")\n        digest = packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]\n        if row.get("crop_sha256") != digest:\n            raise RuntimeError("full_m_returned_crop_hash_mismatch")\n        rows.append(row)\n    return rows\n# END reviewed verify-only full-M projection probe\n\n\n', ''), (563, 564, '    def __init__(self, module, *, rank, start, stop, windows, full_m_ctx=None):\n', '    def __init__(self, module, *, rank, start, stop, windows):\n'), (565, 566, '        self.full_m = None if full_m_ctx is None else FullMProjection(full_m_ctx)\n', ''), (595, 597, '                    result = (self.original(qinput, weight, bias) if self.full_m is None\n                              else self.full_m.execute(self.original, qinput, weight, bias))\n', '                    result = self.original(qinput, weight, bias)\n'), (694, 696, '        return {"capture": self.capture, "replays": list(self.replays),\n            "full_m": None if self.full_m is None else self.full_m.record, "status": {\n', '        return {"capture": self.capture, "replays": list(self.replays), "status": {\n'), (721, 722, '                "sp_input_scope": "source_local_before_full_m_padding",\n', ''), (762, 763, '    """Diagnostic CPU samples, plus an explicit SP-only block34 full-M probe.\n', '    """Diagnostic CPU samples only; hooks never change a model result.\n'), (768, 769, '    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None, sp_ctx=None):\n', '    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None):\n'), (770, 771, '        self.sp_ctx = sp_ctx\n', ''), (821, 822, '                                           stop=self.stop, windows=self.hash_windows, full_m_ctx=self.sp_ctx)\n', '                                           stop=self.stop, windows=self.hash_windows)\n'), (1520, 1521, '    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop, sp_ctx=ctx)\n', '    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop)\n'), (1527, 1529, '        if trace is not None:\n            full_m_installation_vote(trace, ctx)\n', '')], 'sp_group.py': [(206, 208, '        if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY and os.environ.get("MINIMAX_SP_VERIFY") != "1":\n            raise RuntimeError("MiniMax SP full-M probe requires verification; formal execution is disabled")\n', ''), (392, 393, '                            logging.info("[minimax_sp][projection_source_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '                            logging.info("[minimax_sp][projection_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n'), (395, 398, '                        full_m_rows = spf.projection_full_m_summary(packets, native_trace.packet())\n                        for row in full_m_rows:\n                            logging.info("[minimax_sp][projection_full_m] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', ''), (419, 422, '                if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY:\n                    logging.info("[minimax_sp][full_m_probe_complete] native_parity_pass=1 formal_eligible=0")\n                    raise RuntimeError("MiniMax SP full-M diagnostic complete; formal execution remains disabled")\n', '')]}
 FULL_M_PRIOR_SHA = {'sp_forward.py': '73b12335ed6ad131285bfb746a13661ce7d206c81a15752db43c8e1b212001e4', 'sp_group.py': '881e10961aa812802af7834aa01724c3d6becdb6bdc2fee4e3056ba3fbf232d5'}
 
 def reverse_full_m(source, name='sp_forward.py'):
+    source=reverse_all_out_full_m(source,name)
     lines=source.splitlines(keepends=True)
     for lo,hi,after,before in reversed(FULL_M_REVERSE_EDITS[name]):
         if ''.join(lines[lo:hi])!=after:
@@ -477,7 +492,7 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[]),
             layer_hash_summary=Mock(return_value=[]), projection_hash_summary=Mock(return_value=[]),
             projection_replay_summary=Mock(return_value={"statuses":[],"actual":[],"replays":[],"complete":True}),
-            projection_full_m_summary=Mock(return_value=[]), FULL_M_DIAGNOSTIC_PROBE_ONLY=False),
+            projection_full_m_summary=Mock(return_value=[]), projection_full_m_scope_summary=Mock(return_value=[]), FULL_M_DIAGNOSTIC_PROBE_ONLY=False),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -1853,8 +1868,9 @@ class FullMProbeGateTests(unittest.TestCase):
         for local_ready, peer_ready in ((False, True), (True, False), (True, True)):
             ctx = SimpleNamespace(rank=0, group="owned-group")
             probe = SimpleNamespace(ctx=ctx, installation_verified=False)
-            trace = SimpleNamespace(errors=[], replay=SimpleNamespace(
-                installed=local_ready, error_code=None, full_m=probe))
+            scope = SimpleNamespace(ctx=ctx, probes={i: probe for i in range(50)},
+                ready=lambda: local_ready, installation_ballot_count=0)
+            trace = SimpleNamespace(errors=[], all_out_full_m=scope)
             calls = []
             def reduce(flag, *, op, group):
                 calls.append((op, group))
@@ -2048,7 +2064,9 @@ class FullMProjectionLifecycleTests(_fm_unittest.TestCase):
                 h = _FMHarness(peer_votes=(peer_ready, True))
                 h.scope.installation_verified = False
                 replay = _FMNamespace(full_m=h.scope, installed=local_ready, error_code=None)
-                trace = _FMNamespace(replay=replay, errors=[])
+                scope = _FMNamespace(ctx=h.ctx, probes={i: h.scope for i in range(50)},
+                    ready=lambda: local_ready, installation_ballot_count=0)
+                trace = _FMNamespace(replay=replay, errors=[], all_out_full_m=scope)
                 vote = h.namespace["full_m_installation_vote"]
                 if local_ready and peer_ready:
                     vote(trace, h.ctx)
@@ -2119,7 +2137,7 @@ class FullMProjectionLifecycleTests(_fm_unittest.TestCase):
         self.assertEqual(h.logs[0][-1], "full_m_execution_failed")
         self.assertNotIn("fixture_private_error", repr(h.logs))
 
-    def test_json_summary_requires_two_rows_and_rejects_native_intervention(self):
+    def test_json_summary_requires_all_targets_and_rejects_native_intervention(self):
         packets = []
         for rank in (0, 1):
             h = _FMHarness(rank=rank)
@@ -2129,16 +2147,297 @@ class FullMProjectionLifecycleTests(_fm_unittest.TestCase):
             self.assertFalse(row["backend_verified"])
             self.assertFalse(row["native_oracle_changed"])
             self.assertFalse(row["formal_eligible"])
+            records = [{**row, "block": block, "native_quant_comparison_available": block == 34,
+                        "returned_post_hook_sha256": row["crop_sha256"]} for block in range(50)]
             packets.append({"start": h.ctx.start, "stop": h.ctx.stop,
-                "projection_replay": {"full_m": row},
+                "all_out_full_m": {"errors": [], "records": records,
+                    "post_hashes": {i: row["crop_sha256"] for i in range(50)}},
+                "projection_replay": {"full_m": records[34]},
                 "projection_hashes": {"attn.out_proj.post": [{"sha256": row["crop_sha256"]}]}})
         summary = h.namespace["projection_full_m_summary"]
-        self.assertEqual(len(summary(packets, {"projection_replay": {}})), 2)
+        self.assertEqual(len(summary(packets, {"projection_replay": {}})), 100)
         with self.assertRaisesRegex(RuntimeError, "native_intervention_rejected"):
             summary(packets, {"projection_replay": {"full_m": packets[0]["projection_replay"]["full_m"]}})
         packets[0]["projection_hashes"]["attn.out_proj.post"][0]["sha256"] = "0" * 64
         with self.assertRaisesRegex(RuntimeError, "returned_crop_hash_mismatch"):
             summary(packets, {"projection_replay": {}})
+
+
+
+"""Portable CPU metadata fixtures for actual AllOutFullM AST, without Torch/GPU.
+
+Only the per-projection GEMM/storage operation is stubbed. The real 49 wrapper
+closures, 50 post hooks, installation ballot, cleanup and evidence summaries run.
+This does not test CUDA collectives, NVFP4 numerics, or model quality.
+"""
+import ast as _ao_ast
+import copy as _ao_copy
+import hashlib as _ao_hashlib
+import json as _ao_json
+from pathlib import Path as _AOPath
+from types import SimpleNamespace as _AONamespace
+import threading as _ao_threading
+import unittest as _ao_unittest
+
+
+def _ao_source():
+    here = _AOPath(__file__).resolve()
+    standalone = here.parent / "comfy-omni-deployment/custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
+    return standalone if standalone.is_file() else here.parents[1] / "custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
+
+
+class _AOOutput:
+    def __init__(self, rows, digest):
+        self.shape = (rows, 5376)
+        self.digest = digest
+
+
+class _AOModule:
+    in_features = 7168
+    out_features = 5376
+    pre_quant_scale = input_scale = None
+    quant_format = "nvfp4"
+    layout_type = "TensorCoreNVFP4Layout"
+
+    def __init__(self, index, owner):
+        self.index, self.owner, self.hooks = index, owner, []
+        self.native_calls = 0
+
+    def _forward(self, qinput, weight, bias):
+        self.native_calls += 1
+        self.owner.native_order.append(self.index)
+        if self.owner.fail_block == self.index:
+            raise RuntimeError("private_fixture_failure_must_not_enter_packet")
+        return _AOOutput(self.owner.ctx.local, _ao_hashlib.sha256(
+            f"rank={self.owner.ctx.rank},out_proj={self.index}".encode()).hexdigest())
+
+    def register_forward_hook(self, function):
+        if self.owner.hook_failure == self.index:
+            raise RuntimeError("fixture_hook_install_error")
+        self.hooks.append(function)
+        removed = [False]
+        def remove():
+            if not removed[0]:
+                self.hooks.remove(function)
+                removed[0] = True
+        return _AONamespace(remove=remove)
+
+    def __call__(self):
+        output = self._forward(self.owner.qinput, self.owner.weight, self.owner.bias)
+        for hook in list(self.hooks):
+            hook(self, (), output)
+        return output
+
+
+class _AOHarness:
+    def __init__(self, *, rank=0, world=2, hook_failure=None, fail_block=None, peer_ready=True):
+        self.hook_failure, self.fail_block, self.peer_ready = hook_failure, fail_block, peer_ready
+        self.qinput, self.weight, self.bias = object(), object(), object()
+        self.native_order, self.probe_order, self.votes, self.logs = [], [], [], []
+        start, stop = (0, 22584) if rank == 0 else (22584, 45167)
+        self.ctx = _AONamespace(rank=rank, world=world, start=start, stop=stop,
+            local=stop-start, seq_len=45167, splits=[22584, 22583], group=object())
+        owner = self
+
+        class Projection:
+            def __init__(self, ctx, block=34):
+                self.ctx, self.block = ctx, block
+                self.record, self.installation_verified = None, False
+                self.calls = self.ballots = 0
+
+            def execute(self, original, qinput, weight, bias):
+                # The separately tested FullMProjection owns its two target
+                # ballots/storage work; this stub records which actual wrapper
+                # reached it and preserves the real saved callable identity.
+                assert self.installation_verified
+                assert (qinput, weight, bias) == (owner.qinput, owner.weight, owner.bias)
+                self.calls += 1
+                ctx = self.ctx
+                owner.probe_order.append(self.block)
+                self.ballots += 2
+                output = original(qinput, weight, bias)
+                self.record = {"rank": ctx.rank, "block": self.block, "applied": True,
+                    "scope": "verify_first_forward_all_out_proj", "call_count": self.calls,
+                    "ballot_count": 2, "formal_eligible": False, "installation_ballot_count": 1,
+                    "native_quant_comparison_available": self.block == 34,
+                    "global_start": ctx.start, "global_stop": ctx.stop,
+                    "source_local_input": {"fixture": self.block},
+                    "executed_retained_input": {"fixture": self.block},
+                    "outside_window_zero": True, "crop_sha256": output.digest}
+                return output
+
+        self.modules = [_AOModule(index, self) for index in range(50)]
+        self.dit = _AONamespace(blocks=[_AONamespace(attn=_AONamespace(out_proj=m)) for m in self.modules])
+        # Exercise restoring both a prior instance attribute and a class method.
+        self.prior_instance = self.modules[7]._forward
+        self.modules[7]._forward = self.prior_instance
+        self.replay_original = self.modules[34]._forward
+        probe34 = Projection(self.ctx)
+        def replay_wrapped(qinput, weight, bias):
+            return probe34.execute(self.replay_original, qinput, weight, bias)
+        self.modules[34]._forward = replay_wrapped
+        self.replay = _AONamespace(module=self.modules[34], full_m=probe34,
+            installed=True, error_code=None, wrapped=replay_wrapped)
+
+        def flag(values, *, dtype, device):
+            assert dtype == "int32" and device == "cuda:0"
+            cell = _AONamespace(value=values[0]); cell.item = lambda: cell.value
+            return cell
+        def reduce(cell, *, op, group):
+            assert op == "MIN" and group is self.ctx.group
+            self.votes.append(cell.value)
+            cell.value = int(bool(cell.value) and self.peer_ready)
+        def digest(output, *, tensor_global_start, global_start, global_stop):
+            assert (tensor_global_start, global_start, global_stop) == (start, start, stop)
+            return {"sha256": output.digest}
+        ns = {"FullMProjection": Projection, "threading": _ao_threading,
+            "_ABSENT": object(), "streamed_tensor_sha256": digest,
+            "torch": _AONamespace(tensor=flag, int32="int32"),
+            "dist": _AONamespace(all_reduce=reduce, ReduceOp=_AONamespace(MIN="MIN")),
+            "logging": _AONamespace(info=lambda *args: self.logs.append(args))}
+        wanted = {"AllOutFullM", "full_m_installation_vote", "projection_full_m_summary",
+                  "projection_full_m_scope_summary"}
+        source = _ao_source()
+        tree = _ao_ast.parse(source.read_text())
+        selected = [node for node in tree.body
+            if isinstance(node, (_ao_ast.ClassDef, _ao_ast.FunctionDef)) and node.name in wanted]
+        assert {node.name for node in selected} == wanted
+        exec(compile(_ao_ast.Module(body=selected, type_ignores=[]), str(source), "exec"), ns)
+        self.ns = ns
+        self.scope = ns["AllOutFullM"](self.dit, self.ctx, self.replay)
+        self.trace = _AONamespace(all_out_full_m=self.scope, errors=[])
+
+    def vote(self):
+        self.ns["full_m_installation_vote"](self.trace, self.ctx)
+
+    def run(self):
+        with self.scope:
+            self.vote()
+            for module in self.modules:
+                module()
+        return self.packet()
+
+    def packet(self):
+        record34 = self.scope.probes[34].record
+        return {"start": self.ctx.start, "stop": self.ctx.stop,
+            "all_out_full_m": self.scope.packet(), "projection_replay": {"full_m": record34},
+            "projection_hashes": {"attn.out_proj.post": [{"sha256": record34["crop_sha256"] if record34 else None}]},
+            # Deliberately different residual hash: it must never bind a crop.
+            "full_hashes": {f"block{i}.post": [{"sha256": "f" * 64}] for i in range(50)}}
+
+
+class AllOutFullMScopeTests(_ao_unittest.TestCase):
+    def assert_restored(self, h):
+        for index, module in enumerate(h.modules):
+            self.assertEqual(module.hooks, [])
+            if index == 34:
+                self.assertIs(module._forward, h.replay.wrapped)
+            elif index == 7:
+                self.assertIs(module._forward, h.prior_instance)
+            else:
+                self.assertNotIn("_forward", vars(module))
+
+    def test_real_closures_bind_all_50_targets_once_and_restore_only_owned_49(self):
+        packets = []
+        for rank in (0, 1):
+            h = _AOHarness(rank=rank)
+            original34 = h.modules[34]._forward
+            packets.append(h.run())
+            self.assertEqual(h.native_order, list(range(50)))
+            self.assertEqual(h.probe_order, list(range(50)))
+            self.assertEqual(h.votes, [1])
+            self.assertIs(h.modules[34]._forward, original34)
+            self.assertIs(h.scope.probes[34], h.replay.full_m)
+            self.assertEqual(set(h.scope.post_hashes), set(range(50)))
+            self.assert_restored(h)
+        native = {"projection_replay": {}}
+        self.assertEqual(len(h.ns["projection_full_m_summary"](packets, native)), 100)
+        scopes = h.ns["projection_full_m_scope_summary"](packets, native)
+        self.assertEqual([r["total_ballot_count"] for r in scopes], [101, 101])
+        self.assertEqual([r["target_ballot_count"] for r in scopes], [100, 100])
+        self.assertTrue(all(r["formal_eligible"] is False for r in scopes))
+        _ao_json.dumps(packets, allow_nan=False)  # No Tensor or private object leaks.
+
+    def test_partial_installation_and_peer_rejection_enter_shared_vote_without_calls(self):
+        for options in ({"hook_failure": 19}, {"peer_ready": False}):
+            with self.subTest(options=options):
+                h = _AOHarness(**options)
+                with h.scope:
+                    with self.assertRaisesRegex(RuntimeError, "installation rejected"):
+                        h.vote()
+                    self.assertFalse(any(p.installation_verified for p in h.scope.probes.values()))
+                self.assertEqual(h.votes, [0 if "hook_failure" in options else 1])
+                self.assertEqual(h.native_order, [])
+                self.assert_restored(h)
+
+    def test_body_exception_restores_wrappers_and_hooks_without_suppressing_error(self):
+        h = _AOHarness(fail_block=17)
+        with self.assertRaisesRegex(RuntimeError, "private_fixture_failure"):
+            h.run()
+        self.assertEqual(h.native_order, list(range(18)))
+        self.assertEqual(set(h.scope.post_hashes), set(range(17)))
+        self.assert_restored(h)
+        self.assertNotIn("private_fixture", _ao_json.dumps(h.scope.packet()))
+
+    def test_missing_duplicate_and_changed_actual_post_hash_are_rejected(self):
+        for mode in ("missing", "duplicate", "changed"):
+            with self.subTest(mode=mode):
+                h = _AOHarness()
+                with h.scope:
+                    h.vote()
+                    for index, module in enumerate(h.modules):
+                        if mode == "missing" and index == 49:
+                            continue
+                        module()
+                    if mode in ("duplicate", "changed"):
+                        if mode == "changed":
+                            h.scope.post_hashes.pop(5)
+                        h.scope._capture_post(5, _AOOutput(h.ctx.local, "0" * 64))
+                peer = _AOHarness(rank=1).run()
+                with self.assertRaises(RuntimeError):
+                    h.ns["projection_full_m_summary"]([h.packet(), peer], {"projection_replay": {}})
+                self.assert_restored(h)
+
+    def test_crop_uses_actual_module_post_not_residual_and_34_retains_extra_binding(self):
+        h = _AOHarness(); packets = [h.run(), _AOHarness(rank=1).run()]
+        summary = h.ns["projection_full_m_summary"]
+        self.assertEqual(len(summary(packets, {"projection_replay": {}})), 100)
+        for block in (12, 34):
+            altered = _ao_copy.deepcopy(packets)
+            altered[0]["all_out_full_m"]["records"][block]["crop_sha256"] = "f" * 64
+            with self.assertRaises(RuntimeError):
+                summary(altered, {"projection_replay": {}})
+        altered = _ao_copy.deepcopy(packets)
+        altered[0]["projection_hashes"]["attn.out_proj.post"][0]["sha256"] = "e" * 64
+        with self.assertRaises(RuntimeError):
+            summary(altered, {"projection_replay": {}})
+
+    def test_inventory_counts_native_intervention_and_wrong_block_never_qualify(self):
+        h = _AOHarness(); packets = [h.run(), _AOHarness(rank=1).run()]
+        native = {"projection_replay": {}}
+        for mode in ("count", "block", "row", "native", "native_quant_claim"):
+            altered, altered_native = _ao_copy.deepcopy((packets, native))
+            if mode == "count": altered[0]["all_out_full_m"]["scope"]["total_ballot_count"] = 100
+            elif mode == "block": altered[0]["all_out_full_m"]["records"][4]["block"] = 3
+            elif mode == "row": altered[1]["all_out_full_m"]["records"].pop()
+            elif mode == "native": altered_native["all_out_full_m"] = {}
+            else: altered[0]["all_out_full_m"]["records"][4]["native_quant_comparison_available"] = True
+            with self.subTest(mode=mode), self.assertRaises(RuntimeError):
+                h.ns["projection_full_m_scope_summary"](altered, altered_native)
+
+    def test_scope_guards_no_native_install_and_reentry_does_not_destroy_outer_owner(self):
+        native = _AOHarness(world=1)
+        with native.scope:
+            self.assertFalse(native.scope.ready())
+            self.assertEqual(native.scope.wrappers, {})
+        self.assert_restored(native)
+        h = _AOHarness()
+        with h.scope:
+            self.assertTrue(h.scope.ready())
+            with self.assertRaisesRegex(RuntimeError, "reentry"):
+                h.scope.__enter__()
+            self.assertTrue(h.scope.ready())
+        self.assert_restored(h)
 
 
 

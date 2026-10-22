@@ -133,4 +133,8 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 
 第十次GPU诊断使用额外2GiB headroom，目标位置实测空闲2,417,229,824字节，两次同GPU复播成功。rank0的121,411,584元素仅1处不同（绝对差0.5，按原生窗口最大值归一化为3.310381e-5），rank1的121,406,208元素全部一致；两个分片复播结果逐字节重现真实SP输出。相应量化数据、逻辑scales、动态尺度及实际cast W/B一致，证明M尺寸及相关布局变化可以复现首次差异，但未识别具体backend/kernel。最终视频/音频相对误差仍为0.10351562/0.044378698，原门槛未通过。
 
-当前版本是仅用于定位的full-M实验：只在verify首步的block34 out_proj，将各rank已量化的输入放回原始全局行位置，其余行补零，再以原生完整矩阵尺寸计算并clone本rank窗口。原生oracle、权重、精度和1GiB显存门槛保持；记录源local输入与实际full-M执行输入的独立证据。正式SP请求在创建进程组前拒绝；即使首步parity通过，实验也在诊断后主动结束，不继续未修的后续步数，不能据此启动正式速度或质量评测。此full-M修因实验尚待GPU验证。
+上一单点实验版用于定位full-M差异：只在verify首步的block34 out_proj，将各rank已量化的输入放回原始全局行位置，其余行补零，再以原生完整矩阵尺寸计算并clone本rank窗口。原生oracle、权重、精度和1GiB显存门槛保持；记录源local输入与实际full-M执行输入的独立证据。正式SP请求在创建进程组前拒绝；即使首步parity通过，实验也在诊断后主动结束，不继续未修的后续步数，不能据此启动正式速度或质量评测。该单点实验的GPU结果见下一段。
+
+第十一次GPU单点干预确认block34两rank的全部16条投影输入/输出哈希均与native一致，block34层出口也一致；首次完整层出口差异移至rank0 block35、rank1 block36。最终video/audio相对误差为0.10453869/0.039940828，world1镜像仍为0，原门槛未通过。此结果证明block34的单点差异可消除，不能扩展成整条SP2已修复。
+
+当前实验统一在50层的out_proj保持原生M尺寸，qkv/fc投影保留原路径。每rank有50个干预点、共100条记录；独立module post-hook核对实际返回crop的SHA。只有block34具有额外native实际量化输入/权重对照，其他98条只证明source-local值和原全局行位置被保留，不冒称native量化逐位验证；这些crop也不与block残差出口哈希混绑。每rank增加1次共享安装票及100次target准备/执行票，原200次activation amax同步保持。正式生成与首步后的继续执行仍禁止；此all50实验尚未GPU验证，不提供速度结论。
