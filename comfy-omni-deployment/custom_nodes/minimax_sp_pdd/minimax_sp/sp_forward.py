@@ -99,6 +99,9 @@ class SPContext:
 
 def a2a_gather_seq_scatter_heads(t, ctx):
     """[s_local, H, D] -> [S_total, H/P, D]."""
+    if ctx.world == 1:
+        # Diagnostic mirror: preserve fresh-buffer semantics without a new PG.
+        return t.contiguous().clone()
     s_local, heads, dim = t.shape
     p = ctx.world
     hp = heads // p
@@ -116,6 +119,8 @@ def a2a_gather_seq_scatter_heads(t, ctx):
 
 def a2a_scatter_seq_gather_heads(t, ctx):
     """[S_total, (H/P)*D] -> [s_local, H*D]"""
+    if ctx.world == 1:
+        return t.contiguous().clone()
     chunk = t.shape[1]
     p = ctx.world
     s_local = ctx.local
@@ -203,6 +208,8 @@ def _gather_rows(local, counts, ctx, out_dim, device):
     buf = torch.zeros(maxn, out_dim, dtype=torch.float32, device=device)
     if local is not None:
         buf[:local.shape[0]] = local
+    if ctx.world == 1:
+        return buf[:counts[0]].clone()
     gathered = torch.empty(ctx.world * maxn, out_dim, dtype=torch.float32, device=buf.device)
     dist.all_gather_into_tensor(gathered, buf, group=ctx.group)
     gathered = gathered.view(ctx.world, maxn, out_dim)

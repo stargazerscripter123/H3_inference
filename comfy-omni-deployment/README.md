@@ -8,7 +8,7 @@
 
 节点来自[buqi-minimax-h3-multigpu](https://github.com/buqi-code/buqi-minimax-h3-multigpu/tree/a864277f81ee7609972eb64cd1fb086f239d4c99)，保留MIT许可证，本地补丁让最终视频/音频all-gather采用实际输出宽度，以适配本模型32个PDD输出头，并使用目标Torch提供的`all_gather_into_tensor` API。每个文件SHA和补丁边界见[sp-node-contract.json](sp-node-contract.json)。这是复制DiT权重、切分序列的Ulysses SP，未实现DiT TP。原生`MultiGPU CFG Split`在本CFG1配方上不提供所需TP/SP加速。
 
-`--sp-verify --sp-profile`仅可用于sp2诊断：首个SP forward额外与原生forward比较，且逐步同步计时。该诊断不计入正式速度。必须先通过真实双卡数值检查与正常清理，再关闭这两个开关做正式对照。初次GPU诊断已完成双rank模型加载，但首forward在最终gather处因上游调用不存在的`all_gather_single`而失败；没有有效视频，owned实例已正常停止并通过两次空闲检查。目标Torch2.12.0+cu130实测提供`all_gather_into_tensor`，本修复改用该API；修复后的完整SP2数值及性能仍待验。双实例测试进行中，尚无完整性能结论。
+`--sp-verify --sp-profile`仅可用于sp2诊断：首个SP forward额外与原生forward比较，且逐步同步计时。该诊断不计入正式速度。必须先通过真实双卡数值检查与正常清理，再关闭这两个开关做正式对照。初次GPU诊断在最终gather处因上游调用不存在的`all_gather_single`而失败；API修复后，第二次诊断完成了首个双卡forward，但video的最大绝对误差/原生输出最大绝对值为0.16927083，超过0.001门槛，生成被数值检查拒绝。两次均无有效视频，owned实例正常停止并通过两次空闲检查。新增失败诊断会先记录video/audio两组指标，再在同一已加载模型上显式运行world1的SP镜像（collective仅作本地复制），输出其与native的对照后仍拒绝原失败请求；门槛不变，正式路径不增加forward。该诊断用于区分镜像实现与分片差异，不能作为速度成绩。当前只继续单payload双卡SP2；双实例已按用户要求停止，10条已完成视频保留，2条在途请求中断，剩余12条未提交。SP2正式性能和质量均未通过验收。
 
 所有服务绑定loopback；实验复用已密封的业务协议，cap480参考、480×832/362帧/24fps/8步/CFG1，逐次换seed。视频和抽帧由用户人工审阅。与FastVideo对照仍是完整部署配方比较，Comfy使用dense attention及FP16视频VAE。
 

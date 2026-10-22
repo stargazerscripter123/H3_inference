@@ -8,8 +8,8 @@
   "files": {
     "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
     "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
-    "minimax_sp/sp_forward.py": "3771b9a88a580c003136194be2e9862a56078b51004dcad6c790972066da6bf7",
-    "minimax_sp/sp_group.py": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
+    "minimax_sp/sp_forward.py": "51e98f82d164e5c6bf447eaf095ce1dfae0ca4ace10037f695d9f88226142ff3",
+    "minimax_sp/sp_group.py": "9fef9f2d3827bce38139f8b349abba4b4871c070d41926022f935de973c826ac",
     "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
     "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
@@ -24,15 +24,16 @@
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
   },
   "local_patch": {
-    "id": "omni-pdd-final-gather-output-width-and-torch-api-v2",
+    "id": "omni-pdd-gather-api-and-failure-mirror-diagnostic-v3",
     "path": "minimax_sp/sp_forward.py",
     "source_sha256": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
-    "patched_sha256": "3771b9a88a580c003136194be2e9862a56078b51004dcad6c790972066da6bf7",
+    "patched_sha256": "51e98f82d164e5c6bf447eaf095ce1dfae0ca4ace10037f695d9f88226142ff3",
     "description": "Use the actual returned video/audio tensor width for PDD final all-gather, and use the public all_gather_into_tensor API supported by the installed PyTorch 2.12.0+cu130 runtime. Padding, rank order and float32 gather buffers are unchanged.",
     "changes": [
       "video gather out_dim: dit.final_layer.video_out.out_features -> v_local.shape[-1]",
       "audio gather out_dim: dit.final_layer.audio_out.out_features -> a_local.shape[-1]",
-      "final row gather API: dist.all_gather_single -> dist.all_gather_into_tensor"
+      "final row gather API: dist.all_gather_single -> dist.all_gather_into_tensor",
+      "world1-only identity collective branches for failed-verification mirror probe; world2 collectives unchanged"
     ],
     "actual_model_contract": {
       "pdd_steps": 32,
@@ -50,9 +51,22 @@
     "previous_patched_sha256": "6b35d82d2a452eefec8b2c804f23f4cd9235432ce816d2d1a48098e1cfa571da"
   },
   "validation": {
-    "cpu_shape_and_ast_tests": 5,
+    "cpu_shape_and_ast_tests": 14,
     "gpu_tested": false,
-    "full_forward_parity_tested": false
+    "full_forward_parity_tested": false,
+    "full_forward_parity_passed": false,
+    "previous_api_fix_gpu_result": {
+      "video_relative_max": 0.16927083,
+      "threshold": 0.001,
+      "formal_outputs": 0
+    },
+    "scope": "The previous API-only candidate failed the numerical gate. This mirror diagnostic candidate awaits its own GPU check."
   },
-  "scope": "Candidate for a separately labelled two-GPU SP diagnostic; no measured speed or full-model equivalence claim."
+  "scope": "Candidate for a separately labelled two-GPU SP diagnostic; no measured speed or full-model equivalence claim.",
+  "diagnostic_patch": {
+    "path": "minimax_sp/sp_group.py",
+    "source_sha256": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
+    "patched_sha256": "9fef9f2d3827bce38139f8b349abba4b4871c070d41926022f935de973c826ac",
+    "scope": "Existing verify mode logs both streams. On failed SP2/native parity only, run one world1 SP mirror before rejecting with the unchanged 1e-3 threshold. No formal-path extra forward."
+  }
 }

@@ -36,6 +36,23 @@ TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_aud
 _GROUPS = {}
 
 
+def native_parity_metrics(actual_outputs, expected_outputs, *, mirror=False):
+    """Log both streams before a gate decision; retain no intermediate tensors."""
+    if len(actual_outputs) != 2 or len(expected_outputs) != 2:
+        raise RuntimeError("MiniMax SP parity requires both video and audio outputs")
+    metrics = []
+    tag = "verify_mirror_world1" if mirror else "verify"
+    for label, actual, expected in zip(("video", "audio"), actual_outputs, expected_outputs):
+        delta = (actual.float() - expected.float()).abs().max().item()
+        relative = delta / max(expected.float().abs().max().item(), 1e-12)
+        finite = bool(torch.isfinite(actual).all()) and bool(torch.isfinite(expected).all())
+        logging.info("[minimax_sp][%s] %s max_abs=%.8g relative=%.8g finite=%d",
+                     tag, label, delta, relative, finite)
+        metrics.append({"label": label, "max_abs": delta, "relative": relative,
+                        "finite": finite, "passed": finite and relative <= 1e-3})
+    return metrics
+
+
 def positive_timeout(name, default):
     value = os.environ.get(name, str(default))
     try:
@@ -330,12 +347,19 @@ class SPGroup:
                 reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),
                                                 minimax_payload=payload, denoise_mask=denoise_mask,
                                                 audio_denoise_mask=audio_denoise_mask)
-                for label, actual, expected in zip(("video", "audio"), out, reference):
-                    delta = (actual.float() - expected.float()).abs().max().item()
-                    relative = delta / max(expected.float().abs().max().item(), 1e-12)
-                    logging.info("[minimax_sp][verify] %s max_abs=%.8g relative=%.8g", label, delta, relative)
-                    if not torch.isfinite(actual).all() or not torch.isfinite(expected).all() or relative > 1e-3:
-                        raise RuntimeError(f"[minimax_sp] {label} differs from native H3: relative={relative}")
+                checks = native_parity_metrics(out, reference)
+                failed = [row for row in checks if not row["passed"]]
+                if failed:
+                    # One extra forward only on failed verification. The same loaded
+                    # rank-0 DiT and full payload distinguish a mirror discrepancy
+                    # from a cross-rank-only discrepancy; this is not a precision fix.
+                    mirror = spf.sp_forward(dit, x, timestep, context, transformer_options.copy(), payload,
+                                            0, 1, None, denoise_mask, audio_denoise_mask)
+                    mirror_checks = native_parity_metrics(mirror, reference, mirror=True)
+                    logging.info("[minimax_sp][verify_summary] world2_pass=0 world1_pass=%d threshold=0.001",
+                                 all(row["passed"] for row in mirror_checks))
+                    first = failed[0]
+                    raise RuntimeError(f"[minimax_sp] {first['label']} differs from native H3: relative={first['relative']}")
                 self.verify_pending = False
             if profile:
                 torch.cuda.synchronize()
