@@ -52,7 +52,7 @@ from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_atte
 # BEGIN reviewed block0 diagnostic trace
 BLOCK0_TRACE_REQUEST = "_minimax_sp_block0_trace_request"
 BLOCK0_TRACE_RESULT = "_minimax_sp_block0_trace_result"
-TRACE_PROJECTION_BLOCK = 36
+TRACE_PROJECTION_BLOCK = 34
 TRACE_HASH_CHUNK_BYTES = 16 * 1024 * 1024
 BLOCK0_TRACE_POINTS = tuple(name + suffix for name in
     ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
@@ -135,7 +135,7 @@ def stored_head_metadata(final_layer):
 class Block0Trace:
     """Diagnostic CPU samples only; hooks never change a model result.
 
-    Block36 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
+    Block34 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
     before native in-place RoPE/residual updates can change those rows. The
     native oracle samples the union of both ranks' rows. No tensor is logged.
     """
@@ -149,6 +149,7 @@ class Block0Trace:
         self.head_errors = []
         self.hash_windows = list(hash_windows) if hash_windows is not None else [(start, stop)]
         self.full_hashes, self.hash_errors = {}, []
+        self.projection_hashes = {}
         self.entered = False
 
     def _capture(self, point, tensor):
@@ -171,12 +172,12 @@ class Block0Trace:
                 "amax": max(abs(minimum.item()), abs(maximum.item())),
                 "finite": bool(torch.isfinite(minimum)) and bool(torch.isfinite(maximum)),
             }
-            if point.startswith("block") and point.endswith(".post"):
-                try:
-                    self.full_hashes[point] = [streamed_tensor_sha256(tensor, tensor_global_start=self.start,
-                        global_start=start, global_stop=stop) for start, stop in self.hash_windows]
-                except Exception as exc:
-                    self.hash_errors.append(type(exc).__name__)
+            try:
+                destination = self.full_hashes if point.startswith("block") else self.projection_hashes
+                destination[point] = [streamed_tensor_sha256(tensor, tensor_global_start=self.start,
+                    global_start=start, global_stop=stop) for start, stop in self.hash_windows]
+            except Exception as exc:
+                self.hash_errors.append(type(exc).__name__)
         except Exception as exc:
             self.errors.append(type(exc).__name__)
 
@@ -225,7 +226,7 @@ class Block0Trace:
                 "rows": list(self.rows), "errors": list(self.errors),
                 "entries": self.entries, "head_metadata": self.head_metadata,
                 "head_errors": list(self.head_errors), "full_hashes": self.full_hashes,
-                "hash_errors": list(self.hash_errors)}
+                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes}
 
     def capture_head_metadata(self, final_layer):
         try:
@@ -290,25 +291,23 @@ def block0_trace_summary(packets, native):
     return result
 
 
-def layer_hash_summary(packets, native):
+def _trace_hash_summary(packets, native, *, points, field, projection=False):
     """Compare each SP window to the same native window, never concatenate digests."""
     _, total = block0_trace_rows(packets)
-    points = {f"block{index}.post" for index in range(50)}
     for packet in [*packets, native]:
-        if packet.get("hash_errors") or set(packet.get("full_hashes", {})) != points:
+        if packet.get("hash_errors") or set(packet.get(field, {})) != set(points):
             raise RuntimeError("layer_hash_packet_incomplete")
     if native.get("start") != 0 or native.get("stop") != total:
         raise RuntimeError("layer_hash_native_extent_invalid")
     result = []
     keys = {"schema", "dtype", "shape", "global_start", "global_stop", "byte_order", "order",
             "tensor_bytes", "chunk_limit_bytes", "chunks", "sha256"}
-    for index in range(50):
-        point = f"block{index}.post"
-        expected = native["full_hashes"][point]
+    for index, point in enumerate(points):
+        expected = native[field][point]
         if not isinstance(expected, list) or len(expected) != 2:
             raise RuntimeError("layer_hash_native_windows_invalid")
         for rank, packet in enumerate(packets):
-            actual = packet["full_hashes"][point]
+            actual = packet[field][point]
             if not isinstance(actual, list) or len(actual) != 1:
                 raise RuntimeError("layer_hash_sp_windows_invalid")
             actual, reference = actual[0], expected[rank]
@@ -332,11 +331,22 @@ def layer_hash_summary(packets, native):
                     raise RuntimeError("layer_hash_chunk_count_invalid")
             if any(actual[key] != reference[key] for key in keys - {"sha256"}):
                 raise RuntimeError("layer_hash_window_metadata_mismatch")
-            result.append({"schema_version": 1, "block": index, "rank": rank,
+            result.append({"schema_version": 1, "block": TRACE_PROJECTION_BLOCK if projection else index,
+                           "rank": rank, **({"point": point} if projection else {}),
                            **{key: actual[key] for key in keys - {"sha256", "schema"}},
                            "sp_sha256": actual["sha256"], "native_sha256": reference["sha256"],
                            "match": actual["sha256"] == reference["sha256"]})
     return result
+
+
+def layer_hash_summary(packets, native):
+    return _trace_hash_summary(packets, native, points=tuple(f"block{index}.post" for index in range(50)),
+                               field="full_hashes")
+
+
+def projection_hash_summary(packets, native):
+    return _trace_hash_summary(packets, native, points=BLOCK0_TRACE_POINTS[:8],
+                               field="projection_hashes", projection=True)
 
 
 def head_metadata_summary(packets, native):

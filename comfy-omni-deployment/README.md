@@ -19,7 +19,7 @@
 
 第五次GPU诊断确认block 0四个投影输入/输出及block出口的18组采样比较均为0误差，完整tensor的amax也相同；最终视频/音频的最大相对误差仍为0.10351562/0.044378698，world1镜像仍为0。该证据只覆盖各rank固定7行的全部feature，不能扩展成全层逐元素相同。
 
-下一条验证诊断保留首层投影采样，并比较全部50层出口，共58点/rank。内部CPU样本不落盘、不进日志；日志仅含标量误差、有限性与维度。此采样用于定位首次偏差，不证明全层等价；校验失败仍拒绝请求。正式路径不安装trace hook、不增加trace collective，原数值门槛保持不变。
+验证诊断比较全部50层出口，并在选定层保留四个投影的输入/输出采样，共58点/rank。内部CPU样本不落盘、不进日志；日志仅含标量误差、有限性与维度。此采样用于定位首次偏差，不证明全层等价；校验失败仍拒绝请求。正式路径不安装trace hook、不增加trace collective，原数值门槛保持不变。
 
 ## 固定配方
 
@@ -122,3 +122,5 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 最终PDD头的诊断只记录两rank与native的stored运行时类型、dtype和shape等属性，不读取/输出权重值、不额外物化权重。其字段相同不证明实际执行权重相同；`execution_weight_verified=false`。
 
 第六次GPU诊断完整取得116组采样及6条存储属性：block 0–35采样均相同，block 36首次出现采样差异，block 39开始全tensor amax不同；最终SP2仍未通过数值门槛。两rank与native输出头所列存储属性相同（weight BF16、bias FP32），不证明实际cast权重逐位相同。下一诊断将投影采样定位到block36，并对全部50层出口按rank窗口分块计算完整字节SHA，查明更早位置是否存在未被采样覆盖的差异。CPU临时块不超过16MiB，不保留/输出激活内容；拷贝及哈希耗时属于诊断，不计入性能。
+
+第七次GPU诊断取得100条完整层出口哈希：两rank在block 0–33的全部输出字节与native一致，rank0从block34、rank1从block36开始不同；该结果取代仅靠采样推定的首次偏差位置。最终数值仍未通过原门槛，未生成SP2视频。下一诊断将投影定位到block34，增加四个投影输入/输出的16条完整rank窗口哈希；原100层哈希和116组采样保留，使用同一次内部packet gather，不额外运行模型forward。

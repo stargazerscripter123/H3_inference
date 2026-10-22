@@ -378,6 +378,9 @@ class SPGroup:
                         hash_summaries = spf.layer_hash_summary(packets, native_trace.packet())
                         for row in hash_summaries:
                             logging.info("[minimax_sp][layer_hash] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        projection_hashes = spf.projection_hash_summary(packets, native_trace.packet())
+                        for row in projection_hashes:
+                            logging.info("[minimax_sp][projection_hash] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                         head_summaries = spf.head_metadata_summary(packets, native_trace.packet())
                         for row in head_summaries:
                             logging.info("[minimax_sp][head_metadata] %s", json.dumps(row, sort_keys=True, allow_nan=False))
