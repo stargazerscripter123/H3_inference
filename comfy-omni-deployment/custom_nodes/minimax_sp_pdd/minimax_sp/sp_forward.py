@@ -104,6 +104,335 @@ def streamed_tensor_sha256(tensor, *, tensor_global_start, global_start, global_
             "chunks": chunks, "sha256": digest.hexdigest()}
 
 
+def nvfp4_scale_sha256(block_scale, *, logical_rows, logical_cols,
+                       global_start, global_stop, tensor_global_start=0,
+                       chunk_limit_bytes=16777216):
+    """Return a canonical logical-window SHA; never dequantize or move all scales.
+
+    Layout inverse follows comfy-kitchen v0.2.39 float_utils.from_blocked,
+    commit e40e76d9c544b3f74c3b9ea923f7bc3d45a96372, lines 329--352.
+    FP8 bytes, including signed zero/NaN encodings, remain unchanged.
+    """
+    integers = (logical_rows, logical_cols, global_start, global_stop,
+                tensor_global_start, chunk_limit_bytes)
+    if (any(type(value) is not int for value in integers)
+            or logical_rows <= 0 or logical_cols <= 0
+            or tensor_global_start < 0
+            or not 0 < chunk_limit_bytes <= 16777216
+            or not tensor_global_start <= global_start < global_stop <= tensor_global_start + logical_rows
+            or sys.byteorder != "little"):
+        raise RuntimeError("nvfp4_scale_hash_window_or_limit_invalid")
+    padded_rows = ((logical_rows + 127) // 128) * 128
+    padded_cols = ((logical_cols + 3) // 4) * 4
+    tile_bytes = 128 * padded_cols
+    if (not isinstance(block_scale, torch.Tensor) or block_scale.ndim != 2
+            or block_scale.dtype != torch.float8_e4m3fn
+            or tuple(block_scale.shape) != (padded_rows, padded_cols)
+            or not block_scale.is_contiguous()
+            or tile_bytes > chunk_limit_bytes):
+        raise RuntimeError("nvfp4_scale_hash_physical_layout_invalid")
+
+    header = {"schema": "minimax-sp-layer-sha256-v1", "dtype": "torch.uint8",
+              "shape": [global_stop - global_start, logical_cols],
+              "global_start": global_start, "global_stop": global_stop,
+              "byte_order": "little", "order": "C"}
+    digest = hashlib.sha256()
+    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n")
+    local_start = global_start - tensor_global_start
+    local_stop = global_stop - tensor_global_start
+    storage = block_scale.view(torch.uint8)
+    copied_bytes = 0
+    for tile_start in range((local_start // 128) * 128, local_stop, 128):
+        tile = storage[tile_start:tile_start + 128].detach().to(
+            device="cpu", non_blocking=False, copy=True,
+            memory_format=torch.contiguous_format)
+        # One complete 128-row physical tile contains all its column blocks.
+        # Do the inverse only after the bounded synchronous copy to CPU.
+        step1 = tile.reshape(-1, 32, 16)
+        step2 = step1.reshape(-1, 32, 4, 4).transpose(1, 2)
+        step3 = step2.reshape(1, padded_cols // 4, 4, 32, 4)
+        step4 = step3.reshape(1, padded_cols // 4, 128, 4)
+        unblocked = step4.permute(0, 2, 1, 3).reshape(128, padded_cols)
+        first = max(local_start, tile_start) - tile_start
+        last = min(local_stop, tile_start + 128) - tile_start
+        selected = unblocked[first:last, :logical_cols].contiguous()
+        array = selected.numpy()
+        view = memoryview(array).cast("B")
+        try:
+            expected = (last - first) * logical_cols
+            if view.nbytes != expected or view.nbytes > chunk_limit_bytes:
+                raise RuntimeError("nvfp4_scale_hash_chunk_size_invalid")
+            digest.update(view)
+            copied_bytes += view.nbytes
+        finally:
+            view.release()
+            del view, array, selected, unblocked, step4, step3, step2, step1, tile
+    if copied_bytes != (global_stop - global_start) * logical_cols:
+        raise RuntimeError("nvfp4_scale_hash_byte_count_invalid")
+    return digest.hexdigest()
+
+# BEGIN reviewed projection M replay diagnostic
+REPLAY_MINIMUM_FREE_BYTES = 1024 * 1024 * 1024
+REPLAY_ERROR_CODES = ("input_guard_failed", "quantized_guard_failed", "memory_budget_insufficient",
+    "quantized_capture_failed", "replay_execution_failed", "output_compare_failed", "hook_install_failed",
+    "duplicate_target_call", "hook_restore_failed")
+
+
+class ProjectionReplayError(RuntimeError):
+    pass
+
+
+def _replay_require(condition, code):
+    if not condition:
+        raise ProjectionReplayError(code)
+
+
+def _replay_digest(metadata):
+    return hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")).hexdigest()
+
+
+def _replay_quantized_identity(value, *, tensor_global_start, windows):
+    """Hash actual cast QT storage/parameters, excluding padding from input windows."""
+    params, data = value._params, value._qdata
+    shape = list(params.orig_shape)
+    _replay_require(value._layout_cls == "TensorCoreNVFP4Layout" and len(shape) == 2
+        and str(params.orig_dtype) == "torch.bfloat16" and not params.transposed
+        and all(type(n) is int and n > 0 for n in shape) and shape[1] % 16 == 0
+        and str(data.dtype) == "torch.uint8" and data.is_contiguous()
+        and list(data.shape) == [((shape[0] + 15) // 16) * 16, shape[1] // 2]
+        and params.scale.numel() == 1 and str(params.scale.dtype) == "torch.float32",
+        "quantized_guard_failed")
+    scale_sha = streamed_tensor_sha256(params.scale.reshape(1, 1), tensor_global_start=0,
+                                      global_start=0, global_stop=1)["sha256"]
+    items = []
+    for start, stop in windows:
+        packed = streamed_tensor_sha256(data[:shape[0], :shape[1] // 2], tensor_global_start=tensor_global_start,
+                                        global_start=start, global_stop=stop)["sha256"]
+        scales = nvfp4_scale_sha256(params.block_scale, logical_rows=shape[0], logical_cols=shape[1] // 16,
+                                   tensor_global_start=tensor_global_start, global_start=start, global_stop=stop)
+        items.append({"qdata_sha256": packed, "block_scale_sha256": scales, "scale_sha256": scale_sha})
+    return {"shape": shape, "padded_rows": int(data.shape[0]), "dtype": "torch.bfloat16",
+            "layout": "TensorCoreNVFP4Layout", "windows": items}
+
+
+def _replay_weight_bias(weight, bias):
+    info = _replay_quantized_identity(weight, tensor_global_start=0, windows=[(0, 5376)])
+    _replay_require(info["shape"] == [5376, 7168], "quantized_guard_failed")
+    if bias is None:
+        bias_info = {"present": False}
+    else:
+        _replay_require(list(bias.shape) == [5376] and str(bias.dtype) in ("torch.bfloat16", "torch.float32"),
+                        "quantized_guard_failed")
+        bias_info = {"present": True, "shape": [5376], "dtype": str(bias.dtype),
+            "sha256": streamed_tensor_sha256(bias.reshape(1, 5376), tensor_global_start=0,
+                                             global_start=0, global_stop=1)["sha256"]}
+    return _replay_digest(info), _replay_digest(bias_info)
+
+
+def _replay_compare_outputs(full, shard, *, global_start, global_stop):
+    """Complete-window numbers; all CPU comparison scratch is row bounded."""
+    _replay_require(list(full.shape)[1:] == [5376] and list(shard.shape) == [global_stop - global_start, 5376]
+                    and str(full.dtype) == str(shard.dtype) == "torch.bfloat16", "output_compare_failed")
+    # At most five FP32 row buffers fit in the 16 MiB scratch budget.
+    chunk_rows = max(1, TRACE_HASH_CHUNK_BYTES // (5376 * 4 * 5))
+    maximum = reference_amax = 0.0
+    unequal = 0
+    finite = True
+    for offset in range(0, global_stop - global_start, chunk_rows):
+        count = min(chunk_rows, global_stop - global_start - offset)
+        a = full[global_start + offset:global_start + offset + count].detach().to(
+            device="cpu", dtype=torch.float32, non_blocking=False, copy=True, memory_format=torch.contiguous_format)
+        b = shard[offset:offset + count].detach().to(
+            device="cpu", dtype=torch.float32, non_blocking=False, copy=True, memory_format=torch.contiguous_format)
+        finite = finite and bool(torch.isfinite(a).all()) and bool(torch.isfinite(b).all())
+        unequal += int(torch.ne(a, b).sum().item())
+        if finite:
+            maximum = max(maximum, float(torch.max(torch.abs(a - b)).item()))
+            reference_amax = max(reference_amax, float(torch.max(torch.abs(a)).item()))
+        del a, b
+    full_sha = streamed_tensor_sha256(full, tensor_global_start=0,
+                                     global_start=global_start, global_stop=global_stop)["sha256"]
+    shard_sha = streamed_tensor_sha256(shard, tensor_global_start=global_start,
+                                      global_start=global_start, global_stop=global_stop)["sha256"]
+    return {"native_output_sha256": full_sha, "replay_output_sha256": shard_sha,
+            "output_bits_match": full_sha == shard_sha, "finite": finite,
+            "max_abs": maximum if finite else None,
+            "relative": maximum / max(reference_amax, 1e-6) if finite else None,
+            "unequal_elements": unequal, "compared_elements": (global_stop - global_start) * 5376}
+
+
+class ProjectionReplay:
+    """One actual target call observed per scope; native alone replays two row windows.
+
+    Wrapping _forward stays inside the original CastBiasWeightContext. It does not
+    change backend dispatch; a QT argument does not prove a particular CUDA kernel.
+    """
+    def __init__(self, module, *, rank, start, stop, windows):
+        self.module, self.rank, self.start, self.stop = module, rank, start, stop
+        self.windows = list(windows)
+        self.input = self.capture = None
+        self.replays = []
+        self.call_count = 0
+        self.error_code = None
+        self.handles = []
+        self.installed = False
+        self.free_bytes = self.reserved_bytes = self.allocated_bytes = None
+
+    def __enter__(self):
+        try:
+            _replay_require(self.module.in_features == 7168 and self.module.out_features == 5376
+                and getattr(self.module, "pre_quant_scale", None) is None
+                and getattr(self.module, "input_scale", None) is None
+                and getattr(self.module, "quant_format", None) == "nvfp4"
+                and getattr(self.module, "layout_type", None) == "TensorCoreNVFP4Layout"
+                and not getattr(self.module, "_full_precision_mm", False)
+                and not getattr(self.module, "comfy_force_cast_weights", False)
+                and not getattr(self.module, "weight_function", ()) and not getattr(self.module, "bias_function", ()),
+                "input_guard_failed")
+            self.thread = threading.get_ident()
+            self.previous = vars(self.module).get("_forward", _ABSENT)
+            self.original = self.module._forward
+            def before(_module, inputs):
+                self.input = inputs[0] if inputs else None
+            self.handles.append(self.module.register_forward_pre_hook(before))
+            def wrapped(qinput, weight, bias):
+                self.call_count += 1
+                try:
+                    result = self.original(qinput, weight, bias)
+                    self._observe(qinput, weight, bias, result)
+                    return result
+                finally:
+                    self.input = None
+            self.wrapped = wrapped
+            self.module._forward = wrapped
+            self.installed = True
+        except ProjectionReplayError as exc:
+            self.error_code = exc.args[0]
+            self.__exit__(None, None, None)
+        except Exception:
+            self.error_code = "hook_install_failed"
+            self.__exit__(None, None, None)
+        return self
+
+    def _observe(self, qinput, weight, bias, full_output):
+        try:
+            _replay_require(self.call_count == 1, "duplicate_target_call")
+            source = self.input
+            _replay_require(threading.get_ident() == self.thread and source is not None
+                and list(source.shape) == [self.stop - self.start, 7168]
+                and str(source.dtype) == "torch.bfloat16" and source.is_contiguous()
+                and not source.requires_grad, "input_guard_failed")
+            inputs = _replay_quantized_identity(qinput, tensor_global_start=self.start, windows=self.windows)
+            _replay_require(inputs["shape"] == list(source.shape), "quantized_guard_failed")
+            weight_sha, bias_sha = _replay_weight_bias(weight, bias)
+            self.capture = {"input": inputs, "weight": weight_sha, "bias": bias_sha}
+        except ProjectionReplayError as exc:
+            self.error_code = exc.args[0]
+            return
+        except Exception:
+            self.error_code = "quantized_capture_failed"
+            return
+        if self.rank != -1:
+            return
+        try:
+            _replay_require(self.start == 0 and len(self.windows) == 2
+                and self.windows[0][0] == 0 and self.windows[0][1] == self.windows[1][0]
+                and self.windows[1][1] == self.stop, "input_guard_failed")
+            torch.cuda.synchronize(source.device)
+            self.free_bytes = int(torch.cuda.mem_get_info(source.device)[0])
+            self.reserved_bytes = int(torch.cuda.memory_reserved(source.device))
+            self.allocated_bytes = int(torch.cuda.memory_allocated(source.device))
+            _replay_require(self.free_bytes >= REPLAY_MINIMUM_FREE_BYTES, "memory_budget_insufficient")
+            for rank, (start, stop) in enumerate(self.windows):
+                qshard = shard_output = None
+                try:
+                    xshard = source[start:stop]
+                    _replay_require(xshard.is_contiguous(), "input_guard_failed")
+                    qshard = type(qinput).from_float(xshard, qinput._layout_cls, scale=qinput._params.scale)
+                    replay_input = _replay_quantized_identity(qshard, tensor_global_start=start, windows=[(start, stop)])
+                    # _forward is called directly, so replay cannot recurse through the module's hooks.
+                    original_weight, original_bias = weight, bias
+                    shard_output = self.original(qshard, original_weight, original_bias)
+                    _replay_require(original_weight is weight and original_bias is bias
+                        and torch.equal(qshard._params.scale, qinput._params.scale), "quantized_guard_failed")
+                    numbers = _replay_compare_outputs(full_output, shard_output, global_start=start, global_stop=stop)
+                    self.replays.append({"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": rank,
+                        "global_start": start, "global_stop": stop, "logical_rows": stop - start,
+                        "padded_rows": replay_input["padded_rows"], "full_logical_rows": self.stop,
+                        "full_padded_rows": inputs["padded_rows"], "input_width": 7168, "output_width": 5376,
+                        "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout", "scale_reused": True,
+                        "weight_object_reused": original_weight is weight, "bias_object_reused": original_bias is bias,
+                        "backend_verified": False, "native_input": inputs["windows"][rank],
+                        "replay_input": replay_input["windows"][0],
+                        "input_match": inputs["windows"][rank] == replay_input["windows"][0], **numbers})
+                finally:
+                    del qshard, shard_output
+        except ProjectionReplayError as exc:
+            self.error_code = exc.args[0]
+        except Exception:
+            self.error_code = "replay_execution_failed"
+
+    def __exit__(self, _kind, _value, _traceback):
+        self.input = None
+        if self.installed:
+            try:
+                _replay_require(self.module._forward is self.wrapped, "hook_restore_failed")
+                if self.previous is _ABSENT:
+                    delattr(self.module, "_forward")
+                else:
+                    self.module._forward = self.previous
+                self.installed = False
+            except Exception:
+                self.error_code = "hook_restore_failed"
+        while self.handles:
+            try:
+                self.handles.pop().remove()
+            except Exception:
+                self.error_code = "hook_restore_failed"
+        return False
+
+    def packet(self):
+        code = self.error_code
+        if code is None and (self.call_count != 1 or self.capture is None or (self.rank == -1 and len(self.replays) != 2)):
+            code = "quantized_capture_failed"
+        status = "complete" if code is None else ("budget_insufficient" if code == "memory_budget_insufficient" else "error")
+        return {"capture": self.capture, "replays": list(self.replays), "status": {
+            "schema_version": 1, "block": 34, "point": "attn.out_proj", "phase": "native" if self.rank == -1 else "sp2",
+            "rank": self.rank, "status": status, "error_code": code, "call_count": self.call_count,
+            "captured": self.capture is not None, "replay_count": len(self.replays), "backend_verified": False,
+            "minimum_free_bytes": REPLAY_MINIMUM_FREE_BYTES, "free_bytes": self.free_bytes,
+            "reserved_bytes": self.reserved_bytes, "allocated_bytes": self.allocated_bytes}}
+
+
+def projection_replay_summary(packets, native):
+    """Only metadata leaves the hook; incomplete replay never promotes the original parity gate."""
+    actual, replays, statuses = [], [], []
+    records = [packet.get("projection_replay", {}) for packet in [*packets, native]]
+    for record in records:
+        statuses.append(record["status"])
+    reference = records[2].get("capture")
+    if reference is not None:
+        for rank, packet in enumerate(packets):
+            captured = records[rank].get("capture")
+            if captured is None:
+                continue
+            sp_input = captured["input"]["windows"][0]
+            native_input = reference["input"]["windows"][rank]
+            actual.append({"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": rank,
+                "global_start": packet["start"], "global_stop": packet["stop"], "input_width": 7168,
+                "output_width": 5376, "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",
+                "sp_padded_rows": captured["input"]["padded_rows"], "native_padded_rows": reference["input"]["padded_rows"],
+                "sp_input": sp_input, "native_input": native_input, "input_match": sp_input == native_input,
+                "sp_weight": captured["weight"], "native_weight": reference["weight"],
+                "weight_match": captured["weight"] == reference["weight"],
+                "sp_bias": captured["bias"], "native_bias": reference["bias"],
+                "bias_match": captured["bias"] == reference["bias"], "backend_verified": False})
+    replays = records[2].get("replays", [])
+    complete = len(actual) == 2 and len(replays) == 2 and all(row["status"] == "complete" for row in statuses)
+    return {"actual": actual, "replays": replays, "statuses": statuses, "complete": complete}
+# END reviewed projection M replay diagnostic
+
+
 def stored_head_metadata(final_layer):
     """Read attributes only: never materialize/cast/hash a lazy head weight."""
     def known(value, allowed):
@@ -151,6 +480,7 @@ class Block0Trace:
         self.full_hashes, self.hash_errors = {}, []
         self.projection_hashes = {}
         self.entered = False
+        self.replay = None
 
     def _capture(self, point, tensor):
         try:
@@ -189,6 +519,9 @@ class Block0Trace:
             if len(self.dit.blocks) != 50:
                 raise RuntimeError("layer_trace_requires_50_blocks")
             block = self.dit.blocks[TRACE_PROJECTION_BLOCK]
+            self.replay = ProjectionReplay(block.attn.out_proj, rank=self.rank, start=self.start,
+                                           stop=self.stop, windows=self.hash_windows)
+            self.replay.__enter__()
             for name, module in (("attn.qkv_proj", block.attn.qkv_proj),
                                  ("attn.out_proj", block.attn.out_proj),
                                  ("mlp.fc1", block.mlp.fc1), ("mlp.fc2", block.mlp.fc2)):
@@ -210,6 +543,8 @@ class Block0Trace:
         return self
 
     def _remove(self):
+        if self.replay is not None:
+            self.replay.__exit__(None, None, None)
         while self.handles:
             handle = self.handles.pop()
             try:
@@ -226,7 +561,8 @@ class Block0Trace:
                 "rows": list(self.rows), "errors": list(self.errors),
                 "entries": self.entries, "head_metadata": self.head_metadata,
                 "head_errors": list(self.head_errors), "full_hashes": self.full_hashes,
-                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes}
+                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes,
+                "projection_replay": None if self.replay is None else self.replay.packet()}
 
     def capture_head_metadata(self, final_layer):
         try:

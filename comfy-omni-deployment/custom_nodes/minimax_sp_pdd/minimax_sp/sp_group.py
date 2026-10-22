@@ -384,6 +384,15 @@ class SPGroup:
                         head_summaries = spf.head_metadata_summary(packets, native_trace.packet())
                         for row in head_summaries:
                             logging.info("[minimax_sp][head_metadata] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        replay_summary = spf.projection_replay_summary(packets, native_trace.packet())
+                        for row in replay_summary["statuses"]:
+                            logging.info("[minimax_sp][projection_replay_status] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        for row in replay_summary["actual"]:
+                            logging.info("[minimax_sp][projection_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        for row in replay_summary["replays"]:
+                            logging.info("[minimax_sp][projection_replay] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        if not replay_summary["complete"]:
+                            trace_error = "ProjectionReplayIncomplete"
                     except Exception as exc:
                         trace_error = type(exc).__name__
                 if trace_error is not None:

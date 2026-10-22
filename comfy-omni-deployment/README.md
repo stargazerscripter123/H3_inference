@@ -124,3 +124,5 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 第六次GPU诊断完整取得116组采样及6条存储属性：block 0–35采样均相同，block 36首次出现采样差异，block 39开始全tensor amax不同；最终SP2仍未通过数值门槛。两rank与native输出头所列存储属性相同（weight BF16、bias FP32），不证明实际cast权重逐位相同。下一诊断将投影采样定位到block36，并对全部50层出口按rank窗口分块计算完整字节SHA，查明更早位置是否存在未被采样覆盖的差异。CPU临时块不超过16MiB，不保留/输出激活内容；拷贝及哈希耗时属于诊断，不计入性能。
 
 第七次GPU诊断取得100条完整层出口哈希：两rank在block 0–33的全部输出字节与native一致，rank0从block34、rank1从block36开始不同；该结果取代仅靠采样推定的首次偏差位置。最终数值仍未通过原门槛，未生成SP2视频。下一诊断将投影定位到block34，增加四个投影输入/输出的16条完整rank窗口哈希；原100层哈希和116组采样保留，使用同一次内部packet gather，不额外运行模型forward。
+
+第八次GPU诊断完整核对block34的八个投影输入/输出：两rank的qkv输入、qkv输出、attention输出全部字节相同；rank0第一次差异出现在attn.out_proj输出，rank1的八个点全部相同。采样行未捕捉到该差异，完整哈希提供了更窄定位。最终原生数值门槛仍未通过。下一诊断仅在原生oracle的block34 out_proj调用内，复用实际量化输入尺度与cast后权重，顺序复播两个真实分片大小；核对量化输入、逻辑block scales、实际权重和完整输出差异。原native结果与门槛保持不变，不额外运行整个模型；该诊断不证明具体CUDA算法，正式路径不启用复播。

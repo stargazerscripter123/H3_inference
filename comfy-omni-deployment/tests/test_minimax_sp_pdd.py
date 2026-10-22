@@ -23,10 +23,26 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+PROJECTION_REPLAY_REVERSE_EDITS = {'sp_forward.py': [(106, 435, 'def nvfp4_scale_sha256(block_scale, *, logical_rows, logical_cols,\n                       global_start, global_stop, tensor_global_start=0,\n                       chunk_limit_bytes=16777216):\n    """Return a canonical logical-window SHA; never dequantize or move all scales.\n\n    Layout inverse follows comfy-kitchen v0.2.39 float_utils.from_blocked,\n    commit e40e76d9c544b3f74c3b9ea923f7bc3d45a96372, lines 329--352.\n    FP8 bytes, including signed zero/NaN encodings, remain unchanged.\n    """\n    integers = (logical_rows, logical_cols, global_start, global_stop,\n                tensor_global_start, chunk_limit_bytes)\n    if (any(type(value) is not int for value in integers)\n            or logical_rows <= 0 or logical_cols <= 0\n            or tensor_global_start < 0\n            or not 0 < chunk_limit_bytes <= 16777216\n            or not tensor_global_start <= global_start < global_stop <= tensor_global_start + logical_rows\n            or sys.byteorder != "little"):\n        raise RuntimeError("nvfp4_scale_hash_window_or_limit_invalid")\n    padded_rows = ((logical_rows + 127) // 128) * 128\n    padded_cols = ((logical_cols + 3) // 4) * 4\n    tile_bytes = 128 * padded_cols\n    if (not isinstance(block_scale, torch.Tensor) or block_scale.ndim != 2\n            or block_scale.dtype != torch.float8_e4m3fn\n            or tuple(block_scale.shape) != (padded_rows, padded_cols)\n            or not block_scale.is_contiguous()\n            or tile_bytes > chunk_limit_bytes):\n        raise RuntimeError("nvfp4_scale_hash_physical_layout_invalid")\n\n    header = {"schema": "minimax-sp-layer-sha256-v1", "dtype": "torch.uint8",\n              "shape": [global_stop - global_start, logical_cols],\n              "global_start": global_start, "global_stop": global_stop,\n              "byte_order": "little", "order": "C"}\n    digest = hashlib.sha256()\n    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\\n")\n    local_start = global_start - tensor_global_start\n    local_stop = global_stop - tensor_global_start\n    storage = block_scale.view(torch.uint8)\n    copied_bytes = 0\n    for tile_start in range((local_start // 128) * 128, local_stop, 128):\n        tile = storage[tile_start:tile_start + 128].detach().to(\n            device="cpu", non_blocking=False, copy=True,\n            memory_format=torch.contiguous_format)\n        # One complete 128-row physical tile contains all its column blocks.\n        # Do the inverse only after the bounded synchronous copy to CPU.\n        step1 = tile.reshape(-1, 32, 16)\n        step2 = step1.reshape(-1, 32, 4, 4).transpose(1, 2)\n        step3 = step2.reshape(1, padded_cols // 4, 4, 32, 4)\n        step4 = step3.reshape(1, padded_cols // 4, 128, 4)\n        unblocked = step4.permute(0, 2, 1, 3).reshape(128, padded_cols)\n        first = max(local_start, tile_start) - tile_start\n        last = min(local_stop, tile_start + 128) - tile_start\n        selected = unblocked[first:last, :logical_cols].contiguous()\n        array = selected.numpy()\n        view = memoryview(array).cast("B")\n        try:\n            expected = (last - first) * logical_cols\n            if view.nbytes != expected or view.nbytes > chunk_limit_bytes:\n                raise RuntimeError("nvfp4_scale_hash_chunk_size_invalid")\n            digest.update(view)\n            copied_bytes += view.nbytes\n        finally:\n            view.release()\n            del view, array, selected, unblocked, step4, step3, step2, step1, tile\n    if copied_bytes != (global_stop - global_start) * logical_cols:\n        raise RuntimeError("nvfp4_scale_hash_byte_count_invalid")\n    return digest.hexdigest()\n\n# BEGIN reviewed projection M replay diagnostic\nREPLAY_MINIMUM_FREE_BYTES = 1024 * 1024 * 1024\nREPLAY_ERROR_CODES = ("input_guard_failed", "quantized_guard_failed", "memory_budget_insufficient",\n    "quantized_capture_failed", "replay_execution_failed", "output_compare_failed", "hook_install_failed",\n    "duplicate_target_call", "hook_restore_failed")\n\n\nclass ProjectionReplayError(RuntimeError):\n    pass\n\n\ndef _replay_require(condition, code):\n    if not condition:\n        raise ProjectionReplayError(code)\n\n\ndef _replay_digest(metadata):\n    return hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")).hexdigest()\n\n\ndef _replay_quantized_identity(value, *, tensor_global_start, windows):\n    """Hash actual cast QT storage/parameters, excluding padding from input windows."""\n    params, data = value._params, value._qdata\n    shape = list(params.orig_shape)\n    _replay_require(value._layout_cls == "TensorCoreNVFP4Layout" and len(shape) == 2\n        and str(params.orig_dtype) == "torch.bfloat16" and not params.transposed\n        and all(type(n) is int and n > 0 for n in shape) and shape[1] % 16 == 0\n        and str(data.dtype) == "torch.uint8" and data.is_contiguous()\n        and list(data.shape) == [((shape[0] + 15) // 16) * 16, shape[1] // 2]\n        and params.scale.numel() == 1 and str(params.scale.dtype) == "torch.float32",\n        "quantized_guard_failed")\n    scale_sha = streamed_tensor_sha256(params.scale.reshape(1, 1), tensor_global_start=0,\n                                      global_start=0, global_stop=1)["sha256"]\n    items = []\n    for start, stop in windows:\n        packed = streamed_tensor_sha256(data[:shape[0], :shape[1] // 2], tensor_global_start=tensor_global_start,\n                                        global_start=start, global_stop=stop)["sha256"]\n        scales = nvfp4_scale_sha256(params.block_scale, logical_rows=shape[0], logical_cols=shape[1] // 16,\n                                   tensor_global_start=tensor_global_start, global_start=start, global_stop=stop)\n        items.append({"qdata_sha256": packed, "block_scale_sha256": scales, "scale_sha256": scale_sha})\n    return {"shape": shape, "padded_rows": int(data.shape[0]), "dtype": "torch.bfloat16",\n            "layout": "TensorCoreNVFP4Layout", "windows": items}\n\n\ndef _replay_weight_bias(weight, bias):\n    info = _replay_quantized_identity(weight, tensor_global_start=0, windows=[(0, 5376)])\n    _replay_require(info["shape"] == [5376, 7168], "quantized_guard_failed")\n    if bias is None:\n        bias_info = {"present": False}\n    else:\n        _replay_require(list(bias.shape) == [5376] and str(bias.dtype) in ("torch.bfloat16", "torch.float32"),\n                        "quantized_guard_failed")\n        bias_info = {"present": True, "shape": [5376], "dtype": str(bias.dtype),\n            "sha256": streamed_tensor_sha256(bias.reshape(1, 5376), tensor_global_start=0,\n                                             global_start=0, global_stop=1)["sha256"]}\n    return _replay_digest(info), _replay_digest(bias_info)\n\n\ndef _replay_compare_outputs(full, shard, *, global_start, global_stop):\n    """Complete-window numbers; all CPU comparison scratch is row bounded."""\n    _replay_require(list(full.shape)[1:] == [5376] and list(shard.shape) == [global_stop - global_start, 5376]\n                    and str(full.dtype) == str(shard.dtype) == "torch.bfloat16", "output_compare_failed")\n    # At most five FP32 row buffers fit in the 16 MiB scratch budget.\n    chunk_rows = max(1, TRACE_HASH_CHUNK_BYTES // (5376 * 4 * 5))\n    maximum = reference_amax = 0.0\n    unequal = 0\n    finite = True\n    for offset in range(0, global_stop - global_start, chunk_rows):\n        count = min(chunk_rows, global_stop - global_start - offset)\n        a = full[global_start + offset:global_start + offset + count].detach().to(\n            device="cpu", dtype=torch.float32, non_blocking=False, copy=True, memory_format=torch.contiguous_format)\n        b = shard[offset:offset + count].detach().to(\n            device="cpu", dtype=torch.float32, non_blocking=False, copy=True, memory_format=torch.contiguous_format)\n        finite = finite and bool(torch.isfinite(a).all()) and bool(torch.isfinite(b).all())\n        unequal += int(torch.ne(a, b).sum().item())\n        if finite:\n            maximum = max(maximum, float(torch.max(torch.abs(a - b)).item()))\n            reference_amax = max(reference_amax, float(torch.max(torch.abs(a)).item()))\n        del a, b\n    full_sha = streamed_tensor_sha256(full, tensor_global_start=0,\n                                     global_start=global_start, global_stop=global_stop)["sha256"]\n    shard_sha = streamed_tensor_sha256(shard, tensor_global_start=global_start,\n                                      global_start=global_start, global_stop=global_stop)["sha256"]\n    return {"native_output_sha256": full_sha, "replay_output_sha256": shard_sha,\n            "output_bits_match": full_sha == shard_sha, "finite": finite,\n            "max_abs": maximum if finite else None,\n            "relative": maximum / max(reference_amax, 1e-6) if finite else None,\n            "unequal_elements": unequal, "compared_elements": (global_stop - global_start) * 5376}\n\n\nclass ProjectionReplay:\n    """One actual target call observed per scope; native alone replays two row windows.\n\n    Wrapping _forward stays inside the original CastBiasWeightContext. It does not\n    change backend dispatch; a QT argument does not prove a particular CUDA kernel.\n    """\n    def __init__(self, module, *, rank, start, stop, windows):\n        self.module, self.rank, self.start, self.stop = module, rank, start, stop\n        self.windows = list(windows)\n        self.input = self.capture = None\n        self.replays = []\n        self.call_count = 0\n        self.error_code = None\n        self.handles = []\n        self.installed = False\n        self.free_bytes = self.reserved_bytes = self.allocated_bytes = None\n\n    def __enter__(self):\n        try:\n            _replay_require(self.module.in_features == 7168 and self.module.out_features == 5376\n                and getattr(self.module, "pre_quant_scale", None) is None\n                and getattr(self.module, "input_scale", None) is None\n                and getattr(self.module, "quant_format", None) == "nvfp4"\n                and getattr(self.module, "layout_type", None) == "TensorCoreNVFP4Layout"\n                and not getattr(self.module, "_full_precision_mm", False)\n                and not getattr(self.module, "comfy_force_cast_weights", False)\n                and not getattr(self.module, "weight_function", ()) and not getattr(self.module, "bias_function", ()),\n                "input_guard_failed")\n            self.thread = threading.get_ident()\n            self.previous = vars(self.module).get("_forward", _ABSENT)\n            self.original = self.module._forward\n            def before(_module, inputs):\n                self.input = inputs[0] if inputs else None\n            self.handles.append(self.module.register_forward_pre_hook(before))\n            def wrapped(qinput, weight, bias):\n                self.call_count += 1\n                try:\n                    result = self.original(qinput, weight, bias)\n                    self._observe(qinput, weight, bias, result)\n                    return result\n                finally:\n                    self.input = None\n            self.wrapped = wrapped\n            self.module._forward = wrapped\n            self.installed = True\n        except ProjectionReplayError as exc:\n            self.error_code = exc.args[0]\n            self.__exit__(None, None, None)\n        except Exception:\n            self.error_code = "hook_install_failed"\n            self.__exit__(None, None, None)\n        return self\n\n    def _observe(self, qinput, weight, bias, full_output):\n        try:\n            _replay_require(self.call_count == 1, "duplicate_target_call")\n            source = self.input\n            _replay_require(threading.get_ident() == self.thread and source is not None\n                and list(source.shape) == [self.stop - self.start, 7168]\n                and str(source.dtype) == "torch.bfloat16" and source.is_contiguous()\n                and not source.requires_grad, "input_guard_failed")\n            inputs = _replay_quantized_identity(qinput, tensor_global_start=self.start, windows=self.windows)\n            _replay_require(inputs["shape"] == list(source.shape), "quantized_guard_failed")\n            weight_sha, bias_sha = _replay_weight_bias(weight, bias)\n            self.capture = {"input": inputs, "weight": weight_sha, "bias": bias_sha}\n        except ProjectionReplayError as exc:\n            self.error_code = exc.args[0]\n            return\n        except Exception:\n            self.error_code = "quantized_capture_failed"\n            return\n        if self.rank != -1:\n            return\n        try:\n            _replay_require(self.start == 0 and len(self.windows) == 2\n                and self.windows[0][0] == 0 and self.windows[0][1] == self.windows[1][0]\n                and self.windows[1][1] == self.stop, "input_guard_failed")\n            torch.cuda.synchronize(source.device)\n            self.free_bytes = int(torch.cuda.mem_get_info(source.device)[0])\n            self.reserved_bytes = int(torch.cuda.memory_reserved(source.device))\n            self.allocated_bytes = int(torch.cuda.memory_allocated(source.device))\n            _replay_require(self.free_bytes >= REPLAY_MINIMUM_FREE_BYTES, "memory_budget_insufficient")\n            for rank, (start, stop) in enumerate(self.windows):\n                qshard = shard_output = None\n                try:\n                    xshard = source[start:stop]\n                    _replay_require(xshard.is_contiguous(), "input_guard_failed")\n                    qshard = type(qinput).from_float(xshard, qinput._layout_cls, scale=qinput._params.scale)\n                    replay_input = _replay_quantized_identity(qshard, tensor_global_start=start, windows=[(start, stop)])\n                    # _forward is called directly, so replay cannot recurse through the module\'s hooks.\n                    original_weight, original_bias = weight, bias\n                    shard_output = self.original(qshard, original_weight, original_bias)\n                    _replay_require(original_weight is weight and original_bias is bias\n                        and torch.equal(qshard._params.scale, qinput._params.scale), "quantized_guard_failed")\n                    numbers = _replay_compare_outputs(full_output, shard_output, global_start=start, global_stop=stop)\n                    self.replays.append({"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": rank,\n                        "global_start": start, "global_stop": stop, "logical_rows": stop - start,\n                        "padded_rows": replay_input["padded_rows"], "full_logical_rows": self.stop,\n                        "full_padded_rows": inputs["padded_rows"], "input_width": 7168, "output_width": 5376,\n                        "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout", "scale_reused": True,\n                        "weight_object_reused": original_weight is weight, "bias_object_reused": original_bias is bias,\n                        "backend_verified": False, "native_input": inputs["windows"][rank],\n                        "replay_input": replay_input["windows"][0],\n                        "input_match": inputs["windows"][rank] == replay_input["windows"][0], **numbers})\n                finally:\n                    del qshard, shard_output\n        except ProjectionReplayError as exc:\n            self.error_code = exc.args[0]\n        except Exception:\n            self.error_code = "replay_execution_failed"\n\n    def __exit__(self, _kind, _value, _traceback):\n        self.input = None\n        if self.installed:\n            try:\n                _replay_require(self.module._forward is self.wrapped, "hook_restore_failed")\n                if self.previous is _ABSENT:\n                    delattr(self.module, "_forward")\n                else:\n                    self.module._forward = self.previous\n                self.installed = False\n            except Exception:\n                self.error_code = "hook_restore_failed"\n        while self.handles:\n            try:\n                self.handles.pop().remove()\n            except Exception:\n                self.error_code = "hook_restore_failed"\n        return False\n\n    def packet(self):\n        code = self.error_code\n        if code is None and (self.call_count != 1 or self.capture is None or (self.rank == -1 and len(self.replays) != 2)):\n            code = "quantized_capture_failed"\n        status = "complete" if code is None else ("budget_insufficient" if code == "memory_budget_insufficient" else "error")\n        return {"capture": self.capture, "replays": list(self.replays), "status": {\n            "schema_version": 1, "block": 34, "point": "attn.out_proj", "phase": "native" if self.rank == -1 else "sp2",\n            "rank": self.rank, "status": status, "error_code": code, "call_count": self.call_count,\n            "captured": self.capture is not None, "replay_count": len(self.replays), "backend_verified": False,\n            "minimum_free_bytes": REPLAY_MINIMUM_FREE_BYTES, "free_bytes": self.free_bytes,\n            "reserved_bytes": self.reserved_bytes, "allocated_bytes": self.allocated_bytes}}\n\n\ndef projection_replay_summary(packets, native):\n    """Only metadata leaves the hook; incomplete replay never promotes the original parity gate."""\n    actual, replays, statuses = [], [], []\n    records = [packet.get("projection_replay", {}) for packet in [*packets, native]]\n    for record in records:\n        statuses.append(record["status"])\n    reference = records[2].get("capture")\n    if reference is not None:\n        for rank, packet in enumerate(packets):\n            captured = records[rank].get("capture")\n            if captured is None:\n                continue\n            sp_input = captured["input"]["windows"][0]\n            native_input = reference["input"]["windows"][rank]\n            actual.append({"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": rank,\n                "global_start": packet["start"], "global_stop": packet["stop"], "input_width": 7168,\n                "output_width": 5376, "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",\n                "sp_padded_rows": captured["input"]["padded_rows"], "native_padded_rows": reference["input"]["padded_rows"],\n                "sp_input": sp_input, "native_input": native_input, "input_match": sp_input == native_input,\n                "sp_weight": captured["weight"], "native_weight": reference["weight"],\n                "weight_match": captured["weight"] == reference["weight"],\n                "sp_bias": captured["bias"], "native_bias": reference["bias"],\n                "bias_match": captured["bias"] == reference["bias"], "backend_verified": False})\n    replays = records[2].get("replays", [])\n    complete = len(actual) == 2 and len(replays) == 2 and all(row["status"] == "complete" for row in statuses)\n    return {"actual": actual, "replays": replays, "statuses": statuses, "complete": complete}\n# END reviewed projection M replay diagnostic\n\n\n', ''), (482, 483, '        self.replay = None\n', ''), (521, 524, '            self.replay = ProjectionReplay(block.attn.out_proj, rank=self.rank, start=self.start,\n                                           stop=self.stop, windows=self.hash_windows)\n            self.replay.__enter__()\n', ''), (545, 547, '        if self.replay is not None:\n            self.replay.__exit__(None, None, None)\n', ''), (563, 565, '                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes,\n                "projection_replay": None if self.replay is None else self.replay.packet()}\n', '                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes}\n')], 'sp_group.py': [(386, 395, '                        replay_summary = spf.projection_replay_summary(packets, native_trace.packet())\n                        for row in replay_summary["statuses"]:\n                            logging.info("[minimax_sp][projection_replay_status] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                        for row in replay_summary["actual"]:\n                            logging.info("[minimax_sp][projection_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                        for row in replay_summary["replays"]:\n                            logging.info("[minimax_sp][projection_replay] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                        if not replay_summary["complete"]:\n                            trace_error = "ProjectionReplayIncomplete"\n', '')]}
+PROJECTION_REPLAY_PRIOR_SHA = {'sp_forward.py': '9c9dd6617aa7e392d40d573307a7e00c69fcb32477871f770e81a3cf53db5bcf', 'sp_group.py': 'e17a20698d52f87df9c3712a290f496a5f321eae7091665477a9bbda58f9c2ed'}
+
+def reverse_projection_replay(source, name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(PROJECTION_REPLAY_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('projection replay reviewed block digest/lines changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=PROJECTION_REPLAY_PRIOR_SHA[name]:
+        raise AssertionError('projection replay reviewed block digest differs from deployed projection source')
+    return source
+
+
 PROJECTION_HASH_REVERSE_EDITS = {'sp_forward.py': [(54, 55, 'TRACE_PROJECTION_BLOCK = 34\n', 'TRACE_PROJECTION_BLOCK = 36\n'), (137, 138, '    Block34 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,\n', '    Block36 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,\n'), (151, 152, '        self.projection_hashes = {}\n', ''), (174, 180, '            try:\n                destination = self.full_hashes if point.startswith("block") else self.projection_hashes\n                destination[point] = [streamed_tensor_sha256(tensor, tensor_global_start=self.start,\n                    global_start=start, global_stop=stop) for start, stop in self.hash_windows]\n            except Exception as exc:\n                self.hash_errors.append(type(exc).__name__)\n', '            if point.startswith("block") and point.endswith(".post"):\n                try:\n                    self.full_hashes[point] = [streamed_tensor_sha256(tensor, tensor_global_start=self.start,\n                        global_start=start, global_stop=stop) for start, stop in self.hash_windows]\n                except Exception as exc:\n                    self.hash_errors.append(type(exc).__name__)\n'), (228, 229, '                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes}\n', '                "hash_errors": list(self.hash_errors)}\n'), (293, 294, 'def _trace_hash_summary(packets, native, *, points, field, projection=False):\n', 'def layer_hash_summary(packets, native):\n'), (296, 296, '', '    points = {f"block{index}.post" for index in range(50)}\n'), (297, 298, '        if packet.get("hash_errors") or set(packet.get(field, {})) != set(points):\n', '        if packet.get("hash_errors") or set(packet.get("full_hashes", {})) != points:\n'), (304, 306, '    for index, point in enumerate(points):\n        expected = native[field][point]\n', '    for index in range(50):\n        point = f"block{index}.post"\n        expected = native["full_hashes"][point]\n'), (309, 310, '            actual = packet[field][point]\n', '            actual = packet["full_hashes"][point]\n'), (333, 335, '            result.append({"schema_version": 1, "block": TRACE_PROJECTION_BLOCK if projection else index,\n                           "rank": rank, **({"point": point} if projection else {}),\n', '            result.append({"schema_version": 1, "block": index, "rank": rank,\n'), (339, 349, '\n\ndef layer_hash_summary(packets, native):\n    return _trace_hash_summary(packets, native, points=tuple(f"block{index}.post" for index in range(50)),\n                               field="full_hashes")\n\n\ndef projection_hash_summary(packets, native):\n    return _trace_hash_summary(packets, native, points=BLOCK0_TRACE_POINTS[:8],\n                               field="projection_hashes", projection=True)\n', '')], 'sp_group.py': [(380, 383, '                        projection_hashes = spf.projection_hash_summary(packets, native_trace.packet())\n                        for row in projection_hashes:\n                            logging.info("[minimax_sp][projection_hash] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
 PROJECTION_HASH_PRIOR_SHA = {'sp_forward.py': '3c0f0d1f82a8ae0f077c937c81f16fd87be38b82dd65ccecdb95b5c6eb4e3973', 'sp_group.py': '53f9ed0dc0c4b3c61d829446b3b15d5fce5d22cb3df16fa02a4ea317cabb78b3'}
 
 def reverse_projection_hash(source, name='sp_forward.py'):
+    source=reverse_projection_replay(source,name)
     lines=source.splitlines(keepends=True)
     for lo,hi,after,before in reversed(PROJECTION_HASH_REVERSE_EDITS[name]):
         if ''.join(lines[lo:hi])!=after:
@@ -444,7 +460,8 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             block0_trace_rows=Mock(return_value=([0,1],2)),
             Block0Trace=Trace,
             block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[]),
-            layer_hash_summary=Mock(return_value=[]), projection_hash_summary=Mock(return_value=[])),
+            layer_hash_summary=Mock(return_value=[]), projection_hash_summary=Mock(return_value=[]),
+            projection_replay_summary=Mock(return_value={"statuses":[],"actual":[],"replays":[],"complete":True})),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -899,20 +916,22 @@ def _b0t_model():
 def _b0t_load():
     parsed = _b0t_ast.parse(_b0t_source_path().read_text())
     symbols = {"Block0Trace", "block0_trace_rows", "block0_trace_summary", "sp_block",
-               "stored_head_metadata", "head_metadata_summary", "streamed_tensor_sha256", "layer_hash_summary", "_trace_hash_summary", "projection_hash_summary"}
+               "stored_head_metadata", "head_metadata_summary", "streamed_tensor_sha256", "layer_hash_summary", "_trace_hash_summary", "projection_hash_summary", "ProjectionReplay", "ProjectionReplayError",
+               "_replay_require", "_replay_digest", "_replay_quantized_identity", "_replay_weight_bias",
+               "_replay_compare_outputs", "projection_replay_summary", "nvfp4_scale_sha256"}
     selected = [node for node in parsed.body if
                 isinstance(node, (_b0t_ast.FunctionDef, _b0t_ast.ClassDef))
                 and node.name in symbols or
                 isinstance(node, _b0t_ast.Assign) and any(
                     isinstance(target, _b0t_ast.Name)
                     and (target.id in ("BLOCK0_TRACE_POINTS", "TRACE_PROJECTION_BLOCK", "TRACE_HASH_CHUNK_BYTES")
-                         or target.id.startswith("HEAD_METADATA_")) for target in node.targets)]
+                         or target.id.startswith("HEAD_METADATA_") or target.id.startswith("REPLAY_")) for target in node.targets)]
     namespace = {"torch": _B0TNamespace(
         Tensor=_B0TTensor, uint8="uint8", contiguous_format="contiguous",
         aminmax=lambda tensor: (_B0TTensor(tensor.value.min()),
                                 _B0TTensor(tensor.value.max())),
         isfinite=lambda tensor: _B0TTensor(_b0t_np.isfinite(tensor.value))),
-        "hashlib":hashlib,"json":json,"sys":__import__('sys'),
+        "hashlib":hashlib,"json":json,"sys":__import__('sys'), "threading":__import__('threading'), "_ABSENT":object(),
         "region": lambda _name: _b0t_nullcontext(),
         "sp_attention": lambda *args, **kwargs: None}
     exec(compile(_b0t_ast.Module(body=selected, type_ignores=[]),
@@ -1308,6 +1327,469 @@ class ProjectionHashTests(unittest.TestCase):
         f.namespace["spf"].projection_hash_summary.assert_not_called()
         f.namespace["spf"].layer_hash_summary.assert_not_called()
         self.assertEqual(f.args[5],{})
+
+"""CPU NumPy layout fixtures only; no Torch/GPU/media is imported or read."""
+
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import types
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+
+
+class Tensor:
+    copies = []
+
+    def __init__(self, array, dtype="fp8", device="cuda"):
+        self.array, self.dtype, self.device = array, dtype, device
+
+    @property
+    def ndim(self):
+        return self.array.ndim
+
+    @property
+    def shape(self):
+        return self.array.shape
+
+    def is_contiguous(self):
+        return self.array.flags.c_contiguous
+
+    def view(self, dtype):
+        if dtype != "u8":
+            raise AssertionError("only bit-preserving uint8 view is expected")
+        return Tensor(self.array, dtype, self.device)
+
+    def __getitem__(self, index):
+        return Tensor(self.array[index], self.dtype, self.device)
+
+    def detach(self):
+        return self
+
+    def to(self, *, device, non_blocking, copy, memory_format):
+        if (device, non_blocking, copy, memory_format) != ("cpu", False, True, "C"):
+            raise AssertionError("copy must be synchronous CPU contiguous")
+        self.copies.append(self.array.nbytes)
+        return Tensor(np.array(self.array, copy=True, order="C"), self.dtype, "cpu")
+
+    def reshape(self, *shape):
+        if self.device != "cpu":
+            raise AssertionError("inverse layout must run only on CPU")
+        return Tensor(self.array.reshape(*shape), self.dtype, self.device)
+
+    def transpose(self, first, second):
+        return Tensor(self.array.swapaxes(first, second), self.dtype, self.device)
+
+    def permute(self, *axes):
+        return Tensor(self.array.transpose(*axes), self.dtype, self.device)
+
+    def contiguous(self):
+        return Tensor(np.ascontiguousarray(self.array), self.dtype, self.device)
+
+    def numpy(self):
+        if self.device != "cpu":
+            raise AssertionError("no direct GPU NumPy conversion")
+        return self.array
+
+
+FAKE_TORCH = types.SimpleNamespace(Tensor=Tensor, uint8="u8", float8_e4m3fn="fp8", contiguous_format="C")
+_scale_node=next(n for n in ast.parse(AFTER.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=="nvfp4_scale_sha256")
+_scale_namespace={"hashlib":hashlib,"json":json,"sys":sys,"torch":FAKE_TORCH}
+exec(compile(ast.Module(body=[_scale_node],type_ignores=[]),str(AFTER),"exec"),_scale_namespace)
+helper=types.SimpleNamespace(**_scale_namespace)
+
+
+def blocked(logical):
+    """Independent direct CUDA layout offsets, not the helper's reshape inverse."""
+    rows, cols = logical.shape
+    padded_rows, padded_cols = (rows + 127) // 128 * 128, (cols + 3) // 4 * 4
+    flat = np.full(padded_rows * padded_cols, 251, dtype=np.uint8)
+    r = np.arange(rows, dtype=np.int64)[:, None]
+    c = np.arange(cols, dtype=np.int64)[None, :]
+    offsets = ((r // 128) * (padded_cols // 4) + c // 4) * 512 + (r % 32) * 16 + ((r % 128) // 32) * 4 + c % 4
+    flat[offsets] = logical
+    return Tensor(flat.reshape(padded_rows, padded_cols))
+
+
+def expected(logical, start, stop, tensor_start=0):
+    values = np.ascontiguousarray(logical[start - tensor_start:stop - tensor_start])
+    header = {"schema": "minimax-sp-layer-sha256-v1", "dtype": "torch.uint8",
+              "shape": list(values.shape), "global_start": start, "global_stop": stop,
+              "byte_order": "little", "order": "C"}
+    digest = hashlib.sha256(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n")
+    digest.update(memoryview(values).cast("B"))
+    return digest.hexdigest()
+
+
+class ScaleHashTests(unittest.TestCase):
+    def setUp(self):
+        Tensor.copies = []
+
+    def test_independent_swizzle_oracle_and_padding(self):
+        values = np.arange(259 * 7, dtype=np.uint16).reshape(259, 7).astype(np.uint8)
+        actual = helper.nvfp4_scale_sha256(blocked(values), logical_rows=259, logical_cols=7,
+                                           global_start=31, global_stop=258)
+        self.assertEqual(actual, expected(values, 31, 258))
+        self.assertEqual(Tensor.copies, [128 * 8] * 3)
+
+    def test_actual_22584_boundary_full_and_shard(self):
+        rows, cols, split = 45167, 448, 22584
+        r, c = np.arange(rows, dtype=np.uint32)[:, None], np.arange(cols, dtype=np.uint32)[None, :]
+        values = ((r * 17 + c * 29 + r // 128) % 256).astype(np.uint8)
+        full, local = blocked(values), blocked(values[split:])
+        a = helper.nvfp4_scale_sha256(full, logical_rows=rows, logical_cols=cols,
+                                     global_start=split, global_stop=rows)
+        b = helper.nvfp4_scale_sha256(local, logical_rows=rows - split, logical_cols=cols,
+                                     global_start=split, global_stop=rows, tensor_global_start=split)
+        self.assertEqual(a, b)
+        self.assertEqual(a, expected(values, split, rows))
+        self.assertEqual(max(Tensor.copies), 57344)
+        self.assertTrue(all(size <= 16777216 for size in Tensor.copies))
+        # One byte far from the seven diagnostic sample rows must be detected.
+        changed = values[split:].copy()
+        changed[123, 77] ^= 1
+        self.assertNotEqual(b, helper.nvfp4_scale_sha256(blocked(changed),
+            logical_rows=rows - split, logical_cols=cols, global_start=split,
+            global_stop=rows, tensor_global_start=split))
+
+    def test_global_coordinates_are_bound_without_affecting_values(self):
+        values = np.arange(137 * 5, dtype=np.uint16).reshape(137, 5).astype(np.uint8)
+        hashes = []
+        for origin in (0, 22584):
+            actual = helper.nvfp4_scale_sha256(blocked(values), logical_rows=137, logical_cols=5,
+                global_start=origin + 9, global_stop=origin + 130, tensor_global_start=origin)
+            self.assertEqual(actual, expected(values, origin + 9, origin + 130, origin))
+            hashes.append(actual)
+        self.assertNotEqual(*hashes)
+
+    def test_reject_invalid_shape_dtype_window_and_limit_before_copy(self):
+        values = np.zeros((129, 7), dtype=np.uint8)
+        base = dict(logical_rows=129, logical_cols=7, global_start=0, global_stop=129)
+        invalid = [dict(global_start=-1), dict(global_stop=130), dict(global_stop=0),
+                   dict(logical_rows=True), dict(logical_cols=0), dict(chunk_limit_bytes=1023),
+                   dict(chunk_limit_bytes=16777217), dict(tensor_global_start=1)]
+        for changes in invalid:
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                helper.nvfp4_scale_sha256(blocked(values), **{**base, **changes})
+        for tensor in (Tensor(np.zeros((128, 8), dtype=np.uint8)),
+                       Tensor(np.zeros((256, 8), dtype=np.uint8), dtype="u8"),
+                       Tensor(np.zeros((256, 16), dtype=np.uint8)[:, ::2])):
+            with self.assertRaises(RuntimeError):
+                helper.nvfp4_scale_sha256(tensor, **base)
+        self.assertEqual(Tensor.copies, [])
+
+    def test_exact_tile_limit_and_digest_independent_of_limit(self):
+        values = np.arange(131 * 7, dtype=np.uint16).reshape(131, 7).astype(np.uint8)
+        args = dict(logical_rows=131, logical_cols=7, global_start=5, global_stop=130)
+        a = helper.nvfp4_scale_sha256(blocked(values), **args, chunk_limit_bytes=1024)
+        b = helper.nvfp4_scale_sha256(blocked(values), **args)
+        self.assertEqual(a, b)
+        self.assertEqual(a, expected(values, 5, 130))
+
+
+
+
+class _ReplayNumber(_B0TTensor):
+    def __init__(self, value, dtype="torch.bfloat16"):
+        super().__init__(value);self.dtype=dtype
+    def __getitem__(self,item):return _ReplayNumber(self.value[item],self.dtype)
+    def to(self,*,device,**kwargs):
+        if device!="cpu":raise AssertionError("CPU only")
+        return _ReplayNumber(self.value.copy(order="C"),kwargs.get("dtype",self.dtype))
+    def sum(self):return _ReplayNumber(self.value.sum(),self.dtype)
+
+
+class ReplayOutputAndGateTests(unittest.TestCase):
+    def test_full_output_comparison_counts_every_value_and_finite_failure_is_explicit(self):
+        api=_b0t_load();namespace=api._replay_compare_outputs.__globals__
+        namespace["torch"]=SimpleNamespace(float32="torch.float32",uint8="uint8",contiguous_format="contiguous",
+            ne=lambda a,b:_ReplayNumber(np.not_equal(a.value,b.value)),
+            isfinite=lambda a:_ReplayNumber(np.isfinite(a.value)),
+            abs=lambda a:_ReplayNumber(np.abs(a.value)),max=lambda a:_ReplayNumber(np.max(a.value)))
+        full=_ReplayNumber(np.full((9,5376),2.0,np.float32));shard=_ReplayNumber(full.value[4:].copy())
+        shard.value[2,4511]=3.5
+        result=api._replay_compare_outputs(full,shard,global_start=4,global_stop=9)
+        self.assertEqual((result["max_abs"],result["relative"],result["unequal_elements"]),(1.5,.75,1))
+        self.assertEqual(result["compared_elements"],5*5376)
+        self.assertTrue(result["finite"]);self.assertFalse(result["output_bits_match"])
+        shard.value[0,0]=np.nan
+        result=api._replay_compare_outputs(full,shard,global_start=4,global_stop=9)
+        self.assertFalse(result["finite"]);self.assertIsNone(result["max_abs"]);self.assertIsNone(result["relative"])
+        self.assertEqual(result["unequal_elements"],2)
+        json.dumps(result,allow_nan=False)
+
+    def test_actual_quantized_identity_excludes_padding_and_binds_scale_and_window(self):
+        api=_b0t_load();namespace=api._replay_quantized_identity.__globals__
+        namespace["nvfp4_scale_sha256"]=Mock(return_value="7"*64)
+        class Data(_HashRawTensor):
+            def is_contiguous(self):return self.values.flags.c_contiguous
+            def numel(self):return self.values.size
+            def reshape(self,*shape):return Data(self.values.reshape(*shape),self.dtype)
+        params=SimpleNamespace(orig_shape=(5,16),orig_dtype="torch.bfloat16",transposed=False,
+            scale=Data(np.array([2],np.float32),"torch.float32"),block_scale=object())
+        data=Data(np.arange(16*8,dtype=np.uint8).reshape(16,8),"torch.uint8")
+        qt=SimpleNamespace(_params=params,_qdata=data,_layout_cls="TensorCoreNVFP4Layout")
+        kwargs=dict(tensor_global_start=100,windows=[(100,105)])
+        first=api._replay_quantized_identity(qt,**kwargs)
+        self.assertEqual((first["shape"],first["padded_rows"]),([5,16],16))
+        data.values[5:]=0
+        self.assertEqual(first,api._replay_quantized_identity(qt,**kwargs))
+        data.values[3,2]^=1
+        changed=api._replay_quantized_identity(qt,**kwargs)
+        self.assertNotEqual(first["windows"][0]["qdata_sha256"],changed["windows"][0]["qdata_sha256"])
+        self.assertEqual(first["windows"][0]["scale_sha256"],changed["windows"][0]["scale_sha256"])
+        params.transposed=True
+        with self.assertRaisesRegex(RuntimeError,"quantized_guard_failed"):api._replay_quantized_identity(qt,**kwargs)
+
+    def test_budget_incomplete_logs_metadata_but_cannot_accept_original_parity(self):
+        f=parity_fixture(world2_good=True)
+        f.namespace["spf"].projection_replay_summary.return_value={"statuses":[{"status":"budget_insufficient"}],
+            "actual":[],"replays":[],"complete":False}
+        with self.assertRaisesRegex(RuntimeError,"diagnostic evidence incomplete"):f.forward(*f.args)
+        f.namespace["spf"].head_metadata_summary.assert_called_once()
+        f.namespace["spf"].layer_hash_summary.assert_called_once()
+        f.namespace["spf"].projection_hash_summary.assert_called_once()
+        self.assertTrue(any(isinstance(e,tuple) and e[0]=="log" and "[projection_replay_status]" in e[1] for e in f.events))
+        self.assertNotIn(("sp",1),f.events)
+        self.assertTrue(f.owner.verify_pending);f.owner.destroy.assert_called_once()
+        self.assertEqual(f.args[5],{})
+
+"""Appendable CPU lifecycle fixtures; no Torch import, tensors, GPU, or media.
+
+The production ProjectionReplay AST executes unchanged. Only identity hashing and
+numeric output comparison are replaced at their interfaces; these tests do not
+claim NVFP4 arithmetic, CUDA memory availability, or GPU replay correctness.
+"""
+import ast as _pr_ast
+import hashlib as _pr_hashlib
+import json as _pr_json
+from pathlib import Path as _PRPath
+import threading as _pr_threading
+from types import SimpleNamespace as _PRNamespace
+import unittest as _pr_unittest
+
+
+def _pr_source_path():
+    here = _PRPath(__file__).resolve()
+    core = here.with_name("replay_core.py")
+    if core.is_file():
+        return core
+    return here.parents[1] / "custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
+
+
+class _PRFloatRows:
+    """Shape-only input view; slicing never allocates element storage."""
+    dtype = "torch.bfloat16"
+    device = "cuda:0"
+    requires_grad = False
+
+    def __init__(self, rows=45167, origin=0, width=7168):
+        self.shape, self.origin = (rows, width), origin
+
+    def is_contiguous(self):
+        return True
+
+    def __getitem__(self, item):
+        if not isinstance(item, slice) or item.step is not None:
+            raise AssertionError("fixture only supports a contiguous row window")
+        start, stop, _ = item.indices(self.shape[0])
+        return type(self)(stop - start, self.origin + start, self.shape[1])
+
+
+class _PRHarness:
+    def __init__(self, *, free_bytes=2**31, fail_call=None, instance_forward=False):
+        self.quantizations, self.calls, self.comparisons = [], [], []
+        self.identity_calls, self.weight_calls, self.cuda_calls = [], [], []
+        self.scale, self.weight, self.bias = object(), object(), object()
+        self.fail_call = fail_call
+        owner = self
+
+        class QuantizedInput:
+            def __init__(self, source, scale):
+                self.source = source
+                self._layout_cls = "TensorCoreNVFP4Layout"
+                self._params = _PRNamespace(scale=scale)
+
+            @classmethod
+            def from_float(cls, source, layout, *, scale):
+                assert layout == "TensorCoreNVFP4Layout" and type(layout) is str
+                owner.quantizations.append((source, layout, scale))
+                return cls(source, scale)
+
+        class Module:
+            in_features, out_features = 7168, 5376
+            quant_format, layout_type = "nvfp4", "TensorCoreNVFP4Layout"
+            input_scale = pre_quant_scale = None
+
+            def __init__(self):
+                self.hooks, self.removed = [], 0
+
+            def register_forward_pre_hook(self, hook):
+                self.hooks.append(hook)
+                def remove():
+                    self.hooks.remove(hook)
+                    self.removed += 1
+                return _PRNamespace(remove=remove)
+
+            def _forward(self, qinput, weight, bias):
+                owner.calls.append((qinput, weight, bias))
+                if len(owner.calls) == owner.fail_call:
+                    raise RuntimeError("fixture_forward_failed")
+                return _PRNamespace(shape=(qinput.source.shape[0], 5376), call=len(owner.calls))
+
+            def __call__(self, source):
+                for hook in tuple(self.hooks):
+                    hook(self, (source,))
+                qinput = QuantizedInput.from_float(source, self.layout_type, scale=owner.scale)
+                return self._forward(qinput, owner.weight, owner.bias)
+
+        self.module = Module()
+        if instance_forward:
+            bound = self.module._forward
+            self.module._forward = lambda q, w, b: bound(q, w, b)
+        self.previous = vars(self.module).get("_forward")
+        def cuda_call(name, value, device):
+            self.cuda_calls.append((name, device))
+            return value
+        fake_torch = _PRNamespace(equal=lambda a, b: a is b, cuda=_PRNamespace(
+            synchronize=lambda device: cuda_call("synchronize", None, device),
+            mem_get_info=lambda device: cuda_call("mem_get_info", (free_bytes, 2**35), device),
+            memory_reserved=lambda device: cuda_call("memory_reserved", 2**20, device),
+            memory_allocated=lambda device: cuda_call("memory_allocated", 2**19, device)))
+        path = _pr_source_path()
+        selected = {"ProjectionReplay", "ProjectionReplayError", "_replay_require", "_replay_digest",
+                    "_replay_quantized_identity", "_replay_weight_bias", "_replay_compare_outputs"}
+        tree = _pr_ast.parse(path.read_text(encoding="utf-8"))
+        nodes = [node for node in tree.body if isinstance(node, (_pr_ast.ClassDef, _pr_ast.FunctionDef))
+                 and node.name in selected]
+        assert {node.name for node in nodes} == selected
+        ns = {"hashlib": _pr_hashlib, "json": _pr_json, "threading": _pr_threading,
+              "torch": fake_torch, "_ABSENT": object(), "REPLAY_MINIMUM_FREE_BYTES": 2**30}
+        exec(compile(_pr_ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), ns)
+        def identity(qinput, *, tensor_global_start, windows):
+            self.identity_calls.append((qinput, tensor_global_start, tuple(windows)))
+            assert qinput.source.origin == tensor_global_start
+            def digest(start, stop):
+                value = _pr_hashlib.sha256(f"{start}:{stop}:7168".encode()).hexdigest()
+                return {"qdata_sha256": value, "block_scale_sha256": value, "scale_sha256": "a" * 64}
+            return {"shape": list(qinput.source.shape),
+                    "padded_rows": (qinput.source.shape[0] + 15) // 16 * 16,
+                    "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",
+                    "windows": [digest(start, stop) for start, stop in windows]}
+        def weight_bias(weight, bias):
+            assert weight is self.weight and bias is self.bias
+            self.weight_calls.append((weight, bias))
+            return "b" * 64, "c" * 64
+        def compare(full, shard, *, global_start, global_stop):
+            assert full.shape == (45167, 5376) and shard.shape == (global_stop - global_start, 5376)
+            self.comparisons.append((full, shard, global_start, global_stop))
+            return {"native_output_sha256": "d" * 64, "replay_output_sha256": "d" * 64,
+                    "output_bits_match": True, "finite": True, "max_abs": 0.0,
+                    "relative": 0.0, "unequal_elements": 0,
+                    "compared_elements": (global_stop - global_start) * 5376}
+        ns.update(_replay_quantized_identity=identity, _replay_weight_bias=weight_bias,
+                  _replay_compare_outputs=compare)
+        self.scope = ns["ProjectionReplay"](self.module, rank=-1, start=0, stop=45167,
+                                            windows=[(0, 22584), (22584, 45167)])
+
+
+class ProjectionReplayLifecycleTests(_pr_unittest.TestCase):
+    def assert_restored(self, harness):
+        self.assertEqual(harness.module.hooks, [])
+        self.assertFalse(harness.scope.installed)
+        self.assertIsNone(harness.scope.input)
+        if harness.previous is None:
+            self.assertNotIn("_forward", vars(harness.module))
+        else:
+            self.assertIs(harness.module._forward, harness.previous)
+
+    def test_native_once_then_two_windows_reuse_actual_weight_bias_scale(self):
+        h = _PRHarness()
+        with h.scope:
+            result = h.module(_PRFloatRows())
+        self.assertEqual(result.call, 1)
+        self.assertEqual([call[0].source.shape[0] for call in h.calls], [45167, 22584, 22583])
+        self.assertEqual([call[0].source.origin for call in h.calls], [0, 0, 22584])
+        self.assertTrue(all(w is h.weight and b is h.bias for _, w, b in h.calls))
+        self.assertTrue(all(scale is h.scale for _, _, scale in h.quantizations))
+        self.assertEqual(len(h.quantizations), 3)
+        self.assertEqual([(x[2], x[3]) for x in h.comparisons], [(0, 22584), (22584, 45167)])
+        self.assertEqual(h.scope.packet()["status"]["call_count"], 1)
+        self.assertEqual(h.scope.packet()["status"]["status"], "complete")
+        self.assert_restored(h)
+
+    def test_insufficient_free_memory_preserves_native_capture_without_replay(self):
+        h = _PRHarness(free_bytes=2**30 - 1)
+        with h.scope:
+            result = h.module(_PRFloatRows())
+        packet = h.scope.packet()
+        self.assertEqual(result.call, 1)
+        self.assertEqual(len(h.calls), 1)
+        self.assertEqual(len(h.quantizations), 1)
+        self.assertEqual(h.comparisons, [])
+        self.assertIsNotNone(packet["capture"])
+        self.assertEqual(packet["status"]["status"], "budget_insufficient")
+        self.assertEqual(packet["status"]["error_code"], "memory_budget_insufficient")
+        self.assertEqual(packet["status"]["free_bytes"], 2**30 - 1)
+        self.assert_restored(h)
+
+    def test_second_shard_failure_restores_prior_instance_forward(self):
+        h = _PRHarness(fail_call=3, instance_forward=True)
+        with h.scope:
+            result = h.module(_PRFloatRows())
+        packet = h.scope.packet()
+        self.assertEqual(result.call, 1)
+        self.assertEqual(len(h.calls), 3)
+        self.assertEqual(len(packet["replays"]), 1)
+        self.assertEqual(packet["status"]["status"], "error")
+        self.assertEqual(packet["status"]["error_code"], "replay_execution_failed")
+        self.assert_restored(h)
+
+    def test_nondefault_input_scaling_guards_install_no_hook(self):
+        for attribute, value in (("pre_quant_scale", object()), ("input_scale", object()),
+                                 ("input_scale", 1.0)):
+            with self.subTest(attribute=attribute, kind=type(value).__name__):
+                h = _PRHarness()
+                setattr(h.module, attribute, value)
+                with h.scope:
+                    self.assertFalse(h.scope.installed)
+                    self.assertEqual(h.module.hooks, [])
+                self.assertEqual(h.module.removed, 0)
+                self.assertEqual(h.calls, [])
+                self.assertEqual(h.scope.packet()["status"]["error_code"], "input_guard_failed")
+                self.assert_restored(h)
+
+    def test_original_forward_exception_propagates_and_cleans_hook(self):
+        h = _PRHarness(fail_call=1)
+        with self.assertRaisesRegex(RuntimeError, "fixture_forward_failed"):
+            with h.scope:
+                h.module(_PRFloatRows())
+        self.assertEqual(len(h.calls), 1)
+        self.assertEqual(h.identity_calls, [])
+        self.assertEqual(h.cuda_calls, [])
+        self.assertEqual(h.module.removed, 1)
+        self.assertEqual(h.scope.packet()["status"]["status"], "error")
+        self.assert_restored(h)
+
+    def test_packet_is_json_metadata_and_never_claims_backend_verified(self):
+        h = _PRHarness()
+        with h.scope:
+            h.module(_PRFloatRows())
+        packet = h.scope.packet()
+        decoded = _pr_json.loads(_pr_json.dumps(packet, allow_nan=False))
+        self.assertEqual(decoded, packet)
+        self.assertFalse(packet["status"]["backend_verified"])
+        self.assertTrue(all(row["backend_verified"] is False for row in packet["replays"]))
+        self.assertTrue(all(row["input_match"] is True for row in packet["replays"]))
+        self.assertEqual([row["padded_rows"] for row in packet["replays"]], [22592, 22592])
+        self.assertEqual([row["full_padded_rows"] for row in packet["replays"]], [45168, 45168])
+        self.assert_restored(h)
+
+
 
 if __name__ == "__main__":
     unittest.main()
