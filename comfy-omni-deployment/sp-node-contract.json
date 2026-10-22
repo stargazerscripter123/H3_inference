@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "https://github.com/buqi-code/buqi-minimax-h3-multigpu",
+  "upstream_commit": "a864277f81ee7609972eb64cd1fb086f239d4c99",
+  "required_comfyui_commit": "b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c",
+  "node_id": "MiniMaxH3SPUNETLoader",
+  "license": "MIT",
+  "files": {
+    "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
+    "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
+    "minimax_sp/sp_forward.py": "6b35d82d2a452eefec8b2c804f23f4cd9235432ce816d2d1a48098e1cfa571da",
+    "minimax_sp/sp_group.py": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
+    "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
+    "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
+    "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
+  },
+  "upstream_files_sha256": {
+    "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
+    "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
+    "minimax_sp/sp_forward.py": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
+    "minimax_sp/sp_group.py": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
+    "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
+    "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
+    "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
+  },
+  "local_patch": {
+    "id": "omni-pdd-final-gather-output-width-v1",
+    "path": "minimax_sp/sp_forward.py",
+    "source_sha256": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
+    "patched_sha256": "6b35d82d2a452eefec8b2c804f23f4cd9235432ce816d2d1a48098e1cfa571da",
+    "description": "Use the actual returned video/audio tensor width for final all-gather. PDD reduces the stacked head bank to one stream output before gathering.",
+    "changes": [
+      "video gather out_dim: dit.final_layer.video_out.out_features -> v_local.shape[-1]",
+      "audio gather out_dim: dit.final_layer.audio_out.out_features -> a_local.shape[-1]"
+    ],
+    "actual_model_contract": {
+      "pdd_steps": 32,
+      "stored_video_head_rows": 3072,
+      "stored_audio_head_rows": 1024,
+      "video_output_width": 96,
+      "audio_output_width": 32
+    },
+    "unchanged": [
+      "quantized operators",
+      "model weights",
+      "PDD schedule",
+      "attention mathematics"
+    ]
+  },
+  "validation": {
+    "cpu_shape_and_ast_tests": 4,
+    "gpu_tested": false,
+    "full_forward_parity_tested": false
+  },
+  "scope": "Candidate for a separately labelled two-GPU SP diagnostic; no measured speed or full-model equivalence claim."
+}

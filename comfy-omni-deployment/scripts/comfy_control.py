@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Own one isolated, single-GPU ComfyUI Omni service on Linux.
+"""Own isolated single-GPU ComfyUI Omni services in explicit fixed slots on Linux.
 
 No global process cleanup is performed. Stop always requires the owner token,
 UID, process group, start ticks and wrapper argv to match the saved service.
@@ -10,7 +10,7 @@ comparison client; this controller checks pinned model names and file sizes.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
 import json
@@ -30,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 PIN = "b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c"
 VERSION = "0.42.0"
 PORT = 8188
+INSTANCES = {"default": (None, PORT), "gpu0": (0, 8189), "gpu1": (1, 8190), "sp2": (0, 8191)}
 READINESS = "Owned HTTP listener and native node; weights load on first request"
 
 
@@ -63,15 +64,47 @@ def confined(value: str | Path, roots: tuple[Path, ...], *, allow_root: bool = T
     raise ValueError("directory_outside_allowed_project_subtree")
 
 
-def configuration(root: Path, gpu: int = 1, input_dir: str | None = None,
-                  output_dir: str | None = None) -> dict:
+def instance_settings(instance: str, gpu: int | None = None) -> tuple[int, int]:
+    if instance not in INSTANCES:
+        raise ValueError("unknown_instance_slot")
+    fixed_gpu, port = INSTANCES[instance]
+    if gpu is None:
+        gpu = 1 if fixed_gpu is None else fixed_gpu
     if type(gpu) is not int or gpu not in (0, 1):
         raise ValueError("gpu_must_be_single_physical_device_0_or_1")
+    if fixed_gpu is not None and gpu != fixed_gpu:
+        raise ValueError("instance_gpu_mismatch")
+    return gpu, port
+
+
+def instance_run(root: Path, instance: str) -> Path:
+    instance_settings(instance)
+    base = root / "run/comfy-omni"
+    path = base if instance == "default" else base / "instances" / instance
+    if path != path.resolve():
+        raise ValueError("instance_run_directory_must_not_be_aliased")
+    return confined(path, (root,), allow_root=False)
+
+
+def configuration(root: Path, gpu: int | None = None, input_dir: str | None = None,
+                  output_dir: str | None = None, instance: str = "default", *,
+                  sp_verify: bool = False, sp_profile: bool = False) -> dict:
+    gpu, port = instance_settings(instance, gpu)
+    if type(sp_verify) is not bool or type(sp_profile) is not bool or ((sp_verify or sp_profile) and instance != "sp2"):
+        raise ValueError("sp_diagnostics_require_sp2_slot")
     root = project_root(root)
-    run = confined(root / "run/comfy-omni", (root,), allow_root=False)
+    run = instance_run(root, instance)
+    # Explicit slots write only their own input and output trees. The legacy
+    # default keeps its existing paths and fingerprint-compatible config shape.
+    input_base = root / "inputs" if instance == "default" else run / "input"
     input_roots = tuple(confined(path, (root,), allow_root=False)
-                        for path in (root / "inputs", run / "input"))
-    output_base = confined(root / "outputs/comfy-omni", (root,), allow_root=False)
+                        for path in (input_base, run / "input"))
+    output_base = root / "outputs/comfy-omni"
+    if instance != "default":
+        output_base = output_base / "instances" / instance
+        if output_base != output_base.resolve() or run / "input" != (run / "input").resolve():
+            raise ValueError("instance_io_directory_must_not_be_aliased")
+    output_base = confined(output_base, (root,), allow_root=False)
     input_dir = str(confined(input_dir or run / "input", input_roots))
     output_dir = str(confined(output_dir or output_base, (output_base,)))
     source = confined(root / "src/ComfyUI-Omni", (root,), allow_root=False)
@@ -83,7 +116,7 @@ def configuration(root: Path, gpu: int = 1, input_dir: str | None = None,
     python = venv / "bin/python"
     config = {"schema_version": 1, "project_root": str(root), "source": str(source),
               "python": str(python), "comfy_commit": PIN, "comfy_version": VERSION,
-              "listen": "127.0.0.1", "port": PORT, "gpu": gpu,
+              "listen": "127.0.0.1", "port": port, "gpu": gpu,
               "input_dir": input_dir, "output_dir": output_dir,
               "models_dir": str(models), "run_dir": str(run),
               "user_dir": str(confined(run / "user", (run,), allow_root=False)),
@@ -93,12 +126,20 @@ def configuration(root: Path, gpu: int = 1, input_dir: str | None = None,
               "readiness_scope": READINESS,
               "pins_sha256": sha256(HERE.parent / "pins.json"),
               "wrapper_sha256": sha256(HERE / "comfy_service.py")}
+    if instance != "default":
+        config["instance"] = instance
+    if instance == "sp2":
+        config.update(single_gpu=False, gpu_ids=[0, 1], parallelism="ulysses-sp2",
+                      sp_verify=sp_verify, sp_profile=sp_profile,
+                      sp_contract_sha256=sha256(HERE.parent / "sp-node-contract.json"))
     return config
 
 
 def validate_config(config: dict) -> None:
     root = project_root(config["project_root"])
-    expected = configuration(root, config["gpu"], config["input_dir"], config["output_dir"])
+    expected = configuration(root, config["gpu"], config["input_dir"], config["output_dir"],
+                             config.get("instance", "default"),
+                             sp_verify=config.get("sp_verify", False), sp_profile=config.get("sp_profile", False))
     if any(config.get(key) != value for key, value in expected.items()):
         raise ValueError("launch_configuration_mismatch")
     token = config.get("owner_token")
@@ -110,14 +151,18 @@ def validate_config(config: dict) -> None:
 
 
 def command_arguments(config: dict) -> list[str]:
-    """The fixed core supports every flag here; no custom-node whitelist exists."""
-    return [str(Path(config["source"]) / "main.py"),
-            "--listen", "127.0.0.1", "--port", str(PORT),
+    """Only the SP2 slot enables the fixed, hash-verified custom node."""
+    arguments = [str(Path(config["source"]) / "main.py"),
+            "--listen", "127.0.0.1", "--port", str(config["port"]),
             "--disable-metadata", "--disable-auto-launch", "--disable-all-custom-nodes",
             "--preview-method", "none", "--input-directory", config["input_dir"],
             "--output-directory", config["output_dir"],
             "--temp-directory", config["temp_dir"], "--user-directory", config["user_dir"],
             "--models-directory", config["models_dir"]]
+    if config.get("instance") == "sp2":
+        arguments += ["--base-directory", str(HERE.parent),
+                      "--whitelist-custom-nodes", "minimax_sp_pdd"]
+    return arguments
 
 
 def child_environment(config: dict) -> dict[str, str]:
@@ -131,11 +176,38 @@ def child_environment(config: dict) -> dict[str, str]:
                 "VIRTUAL_ENV": str(root / "envs/comfy-omni"), "PYTHONNOUSERSITE": "1",
                 "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": str(config["gpu"]),
                 "PYTHONUNBUFFERED": "1"})
+    if config.get("instance") == "sp2":
+        env.update(CUDA_VISIBLE_DEVICES="0,1", MINIMAX_SP_DEVICES="0,1",
+                   MINIMAX_SP_STARTUP_TIMEOUT="600", MINIMAX_SP_COLLECTIVE_TIMEOUT="180",
+                   MINIMAX_SP_LOGDIR=config["temp_dir"])
+        if config.get("sp_verify"):
+            env["MINIMAX_SP_VERIFY"] = "1"
+        if config.get("sp_profile"):
+            env["MINIMAX_SP_PROFILE"] = "1"
     return env
+
+
+def verify_sp_node() -> dict:
+    contract = json.loads((HERE.parent / "sp-node-contract.json").read_text())
+    base = HERE.parent / "custom_nodes/minimax_sp_pdd"
+    if base != base.resolve():
+        raise RuntimeError("sp_node_alias_rejected")
+    expected = contract["files"]
+    actual = {str(p.relative_to(base)) for p in base.rglob("*.py")}
+    if actual != {n for n in expected if n.endswith(".py")}:
+        raise RuntimeError("sp_node_python_inventory_mismatch")
+    for name, digest in expected.items():
+        path = base / name
+        if path != path.resolve() or not path.is_file() or sha256(path) != digest:
+            raise RuntimeError("sp_node_source_hash_mismatch")
+    return {"upstream_commit": contract["upstream_commit"],
+            "contract_sha256": sha256(HERE.parent / "sp-node-contract.json")}
 
 
 def verify_installation(config: dict) -> dict:
     validate_config(config)
+    if config.get("instance") == "sp2":
+        verify_sp_node()
     source = Path(config["source"])
     if not Path(config["python"]).is_file() or not (source / "main.py").is_file():
         raise FileNotFoundError("isolated_python_or_comfy_source_missing")
@@ -181,6 +253,69 @@ def locked(run: Path):
     with os.fdopen(fd, "a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
+
+
+@contextmanager
+def locked_instance_starts(root: Path):
+    """Serialize reservation checks across slots, without locking long inference."""
+    run = instance_run(root, "default")
+    run.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(run / "instance-start.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def state_port(state: dict) -> int:
+    instance = state.get("instance", "default")
+    _, expected = instance_settings(instance, state.get("gpu"))
+    if type(state.get("port")) is not int or state["port"] != expected:
+        raise RuntimeError("saved_instance_port_mismatch")
+    return expected
+
+
+def validate_state_scope(state: dict, run: Path) -> None:
+    """A receipt from another slot cannot authorize status, retirement or stop."""
+    instance = state.get("instance", "default")
+    state_port(state)
+    if instance == "default":
+        expected_suffix = ("run", "comfy-omni")
+    else:
+        expected_suffix = ("run", "comfy-omni", "instances", instance)
+        if state.get("gpu") != INSTANCES[instance][0]:
+            raise RuntimeError("saved_instance_gpu_mismatch")
+    config = Path(state.get("config", ""))
+    if (not run.is_absolute() or run != run.resolve() or tuple(run.parts[-len(expected_suffix):]) != expected_suffix
+            or not config.is_absolute() or config.parent != run or config != config.resolve()
+            or config.suffix != ".json"):
+        raise RuntimeError("saved_instance_scope_mismatch")
+
+
+def require_available_slot(config: dict, run: Path) -> None:
+    """Known other slots may coexist only on a different, verified GPU.
+
+    This is not a machine-wide idle probe. The runner still checks FastVideo,
+    unknown GPU processes, ports and host RAM before authorizing the pair.
+    The CLI holds the shared start lock while this check and launch execute.
+    """
+    for instance in INSTANCES:
+        other_run = instance_run(Path(config["project_root"]), instance)
+        if other_run == run:
+            continue
+        other = read_state(other_run)
+        if other is None:
+            continue
+        if other.get("identity_established") is False:
+            if unverified_alive(other):
+                raise RuntimeError("other_instance_identity_unverified_no_signals_sent")
+            continue
+        live = owned(other)
+        if not live and group_members(other["pgid"]):
+            raise RuntimeError("other_instance_orphaned_no_signals_sent")
+        reserved = {0, 1} if other.get("instance") == "sp2" else {other.get("gpu")}
+        requested = {0, 1} if config.get("instance") == "sp2" else {config["gpu"]}
+        if live and (type(other.get("gpu")) is not int or reserved.intersection(requested)):
+            raise RuntimeError("gpu_reserved_by_other_instance_no_signals_sent")
 
 
 def proc_identity(pid: int) -> dict | None:
@@ -247,7 +382,7 @@ def group_members(pgid: int) -> list[dict]:
 
 def listener_owned(state: dict) -> bool:
     """A responding unrelated server must never be reported as this service."""
-    address = f"0100007F:{PORT:04X}"
+    address = f"0100007F:{state_port(state):04X}"
     inodes = set()
     for line in Path("/proc/net/tcp").read_text().splitlines()[1:]:
         fields = line.split()
@@ -270,7 +405,7 @@ def listener_owned(state: dict) -> bool:
 def probe(state: dict) -> dict:
     if not listener_owned(state):
         return {"status": "STARTING_OR_UNHEALTHY", "readiness_scope": READINESS}
-    base = f"http://127.0.0.1:{PORT}"
+    base = f"http://127.0.0.1:{state_port(state)}"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(base + "/system_stats", timeout=3) as response:
@@ -278,12 +413,19 @@ def probe(state: dict) -> dict:
         if stats.get("system", {}).get("comfyui_version") != VERSION:
             return {"status": "IDENTITY_MISMATCH"}
         devices = stats.get("devices", [])
-        if len(devices) != 1 or devices[0].get("type") != "cuda" or devices[0].get("index") != 0:
+        expected_devices = [0, 1] if state.get("instance") == "sp2" else [0]
+        if ([d.get("index") for d in devices] != expected_devices
+                or any(d.get("type") != "cuda" for d in devices)):
             return {"status": "IDENTITY_MISMATCH"}
         with opener.open(base + "/object_info/MiniMaxH3ReferenceToVideo", timeout=3) as response:
             nodes = json.load(response)
         if "MiniMaxH3ReferenceToVideo" not in nodes:
             return {"status": "NATIVE_NODE_MISSING"}
+        if state.get("instance") == "sp2":
+            with opener.open(base + "/object_info/MiniMaxH3SPUNETLoader", timeout=3) as response:
+                sp_nodes = json.load(response)
+            if "MiniMaxH3SPUNETLoader" not in sp_nodes:
+                return {"status": "NATIVE_NODE_MISSING"}
         return {"status": "READY", "readiness_scope": READINESS}
     except (OSError, ValueError, urllib.error.URLError):
         return {"status": "STARTING_OR_UNHEALTHY", "readiness_scope": READINESS}
@@ -291,13 +433,19 @@ def probe(state: dict) -> dict:
 
 def read_state(run: Path) -> dict | None:
     path = run / "service.json"
-    return json.loads(path.read_text()) if path.exists() else None
+    if not path.exists():
+        return None
+    if path.is_symlink():
+        raise RuntimeError("saved_state_alias_rejected")
+    state = json.loads(path.read_text())
+    validate_state_scope(state, run)
+    return state
 
 
-def check_port() -> None:
+def check_port(port: int = PORT) -> None:
     with socket.socket() as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", PORT))
+        sock.bind(("127.0.0.1", port))
 
 
 def fingerprint(config: dict) -> str:
@@ -313,6 +461,8 @@ def retired(run: Path, state: dict) -> None:
 
 
 def start(config: dict, run: Path) -> dict:
+    if Path(config["run_dir"]) != run:
+        raise ValueError("launch_instance_run_mismatch")
     previous = read_state(run)
     digest = fingerprint(config)
     if previous:
@@ -330,7 +480,8 @@ def start(config: dict, run: Path) -> dict:
             raise RuntimeError("orphaned_process_group_requires_review_no_signals_sent")
         else:
             retired(run, previous)
-    check_port()
+    require_available_slot(config, run)
+    check_port(config["port"])
     assets = verify_installation(config)
     token = uuid.uuid4().hex
     launch = {**config, "owner_token": token,
@@ -338,7 +489,12 @@ def start(config: dict, run: Path) -> dict:
     root = Path(config["project_root"])
     for key in ("input_dir", "output_dir", "temp_dir", "user_dir"):
         Path(launch[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
-    log_dir = confined(root / "logs/comfy-omni", (root,), allow_root=False)
+    log_base = root / "logs/comfy-omni"
+    if config.get("instance", "default") != "default":
+        log_base = log_base / "instances" / config["instance"]
+        if log_base != log_base.resolve():
+            raise ValueError("instance_log_directory_must_not_be_aliased")
+    log_dir = confined(log_base, (root,), allow_root=False)
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     config_path = run / f"launch-{token}.json"
     atomic_json(config_path, launch)
@@ -350,18 +506,24 @@ def start(config: dict, run: Path) -> dict:
         # Tokens are in the private launch/state files and OS argv, not the log.
         log.write(json.dumps({"comfy_commit": PIN, "fingerprint": digest, "gpu": config["gpu"]}) + "\n")
         log.flush()
-        process = subprocess.Popen(argv, cwd=config["source"], env=child_environment(config),
+        process = subprocess.Popen(argv, cwd=config["source"], env=child_environment(launch),
                                    stdin=null, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True, close_fds=True)
     state = {"schema_version": 1, "pid": process.pid, "pgid": process.pid, "uid": os.getuid(),
              "owner_token": token, "service_script": script, "config": str(config_path),
              "fingerprint": digest, "comfy_commit": PIN, "comfy_version": VERSION,
-             "gpu": config["gpu"], "port": PORT, "input_dir": config["input_dir"],
+             "gpu": config["gpu"], "port": config["port"], "input_dir": config["input_dir"],
              "output_dir": config["output_dir"], "models_dir": config["models_dir"],
              "source": config["source"], "python": config["python"],
              "disable_metadata": True, "disable_all_custom_nodes": True,
              "started_at": time.time(), "log": str(log_path), "asset_preflight": assets,
              "readiness_scope": READINESS}
+    if "instance" in config:
+        state["instance"] = config["instance"]
+    if config.get("instance") == "sp2":
+        state.update(gpu_ids=config["gpu_ids"], parallelism=config["parallelism"],
+                     sp_contract_sha256=config["sp_contract_sha256"],
+                     sp_verify=config["sp_verify"], sp_profile=config["sp_profile"])
     info = None
     for _ in range(100):
         if process.poll() is not None:
@@ -455,7 +617,7 @@ def sanitized(result: dict) -> dict:
     keys = {"schema_version", "status", "reason", "pid", "pgid", "uid", "start_ticks",
             "fingerprint", "comfy_commit", "comfy_version", "gpu", "port", "input_dir", "output_dir",
             "models_dir", "source", "python", "disable_metadata", "disable_all_custom_nodes",
-            "started_at", "stop_requested_at", "force_requested_at", "readiness_scope", "reused"}
+            "started_at", "stop_requested_at", "force_requested_at", "readiness_scope", "reused", "instance", "gpu_ids", "parallelism", "sp_contract_sha256", "sp_verify", "sp_profile"}
     return {key: value for key, value in result.items() if key in keys}
 
 
@@ -463,7 +625,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("render", "validate", "start", "status", "stop"))
     parser.add_argument("--project-root", default="/home/isaac/workdir/h3")
-    parser.add_argument("--gpu", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--instance", choices=tuple(INSTANCES), default="default",
+                        help="default: legacy 8188; gpu0: GPU0/8189; gpu1: GPU1/8190, each with isolated state and I/O")
+    parser.add_argument("--gpu", type=int, choices=(0, 1), default=None,
+                        help="legacy default selects GPU1; explicit slots enforce their fixed GPU")
+    parser.add_argument("--sp-verify", action="store_true", help="SP2 first-forward numerical comparison; diagnostic only")
+    parser.add_argument("--sp-profile", action="store_true", help="SP2 per-forward synchronization; diagnostic only")
     parser.add_argument("--input-dir")
     parser.add_argument("--output-dir")
     parser.add_argument("--expected-owner-token")
@@ -478,15 +645,18 @@ def main(argv: list[str] | None = None) -> int:
     if not 0 <= args.stop_timeout <= 600:
         parser.error("--stop-timeout must be between 0 and 600 seconds")
     root = project_root(args.project_root)
-    run = confined(root / "run/comfy-omni", (root,), allow_root=False)
+    instance_settings(args.instance, args.gpu)
+    run = instance_run(root, args.instance)
     if args.action == "render":
-        result = configuration(root, args.gpu, args.input_dir, args.output_dir)
+        result = configuration(root, args.gpu, args.input_dir, args.output_dir, args.instance,
+                               sp_verify=args.sp_verify, sp_profile=args.sp_profile)
     else:
         if sys.platform != "linux":
             raise RuntimeError("service_lifecycle_requires_linux_proc")
-        with locked(run):
+        with (locked_instance_starts(root) if args.action == "start" else nullcontext()), locked(run):
             if args.action in ("start", "validate"):
-                config = configuration(root, args.gpu, args.input_dir, args.output_dir)
+                config = configuration(root, args.gpu, args.input_dir, args.output_dir, args.instance,
+                               sp_verify=args.sp_verify, sp_profile=args.sp_profile)
                 result = (start(config, run) if args.action == "start"
                           else {"status": "VALIDATED", "asset_preflight": verify_installation(config)})
             elif args.action == "status":

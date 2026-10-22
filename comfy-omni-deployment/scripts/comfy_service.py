@@ -22,8 +22,12 @@ def main(argv: list[str] | None = None) -> None:
     validate_config(config)
     if config.get("owner_token") != args.owner_token:
         raise RuntimeError("launch_owner_token_mismatch")
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != str(config["gpu"]):
-        raise RuntimeError("single_gpu_visibility_mismatch")
+    expected_visibility = "0,1" if config.get("instance") == "sp2" else str(config["gpu"])
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != expected_visibility:
+        raise RuntimeError("gpu_visibility_mismatch")
+    if config.get("instance") == "sp2":
+        from comfy_control import verify_sp_node
+        verify_sp_node()
 
     def stopping(_signum, _frame):
         # ComfyUI handles KeyboardInterrupt around the event loop. During
