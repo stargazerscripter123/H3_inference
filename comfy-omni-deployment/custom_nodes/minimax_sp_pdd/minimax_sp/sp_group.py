@@ -14,6 +14,7 @@ import atexit
 from contextlib import nullcontext
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -32,12 +33,12 @@ from . import sp_forward as spf
 from . import sp_patches as patch_sync
 
 REF_META_KEYS = ("kind", "latent_h", "latent_w", "latent_t", "ref_audio_t")
-TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars", spf.BLOCK0_TRACE_REQUEST)
+TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars", spf.BLOCK0_TRACE_REQUEST, spf.RUNTIME_OPERATION_KEY)
 
 _GROUPS = {}
 
 
-def native_parity_metrics(actual_outputs, expected_outputs, *, mirror=False):
+def native_parity_metrics(actual_outputs, expected_outputs, *, mirror=False, emit=True):
     """Log both streams before a gate decision; retain no intermediate tensors."""
     if len(actual_outputs) != 2 or len(expected_outputs) != 2:
         raise RuntimeError("MiniMax SP parity requires both video and audio outputs")
@@ -47,8 +48,9 @@ def native_parity_metrics(actual_outputs, expected_outputs, *, mirror=False):
         delta = (actual.float() - expected.float()).abs().max().item()
         relative = delta / max(expected.float().abs().max().item(), 1e-12)
         finite = bool(torch.isfinite(actual).all()) and bool(torch.isfinite(expected).all())
-        logging.info("[minimax_sp][%s] %s max_abs=%.8g relative=%.8g finite=%d",
-                     tag, label, delta, relative, finite)
+        if emit:
+            logging.info("[minimax_sp][%s] %s max_abs=%.8g relative=%.8g finite=%d",
+                         tag, label, delta, relative, finite)
         metrics.append({"label": label, "max_abs": delta, "relative": relative,
                         "finite": finite, "passed": finite and relative <= 1e-3})
     return metrics
@@ -204,6 +206,8 @@ def ordered_tensors(x, timestep, context, transformer_options, payload):
 
 class SPGroup:
     def __init__(self, world, unet_name, weight_dtype, devices, port=0):
+        if getattr(spf, "SP_COMPLETE_RECIPE", False) and world != 2:
+            raise RuntimeError("MiniMax SP complete recipe supports exactly two ranks")
         if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY and os.environ.get("MINIMAX_SP_VERIFY") != "1":
             raise RuntimeError("MiniMax SP full-M probe requires verification; formal execution is disabled")
         if dist.is_initialized():
@@ -314,8 +318,88 @@ class SPGroup:
             self.destroy()
             raise
 
+    def forward_complete_recipe(self, dit, x, timestep, context, transformer_options, payload,
+                                denoise_mask=None, audio_denoise_mask=None):
+        self.check_alive()
+        if not self.patches_ready or self.world != 2:
+            raise RuntimeError("MiniMax SP complete recipe requires two ready patched ranks")
+        spf.validate_transformer_options(transformer_options)
+        private_keys = (spf.BLOCK0_TRACE_REQUEST, spf.BLOCK0_TRACE_RESULT, spf.RUNTIME_OPERATION_KEY)
+        if any(key in transformer_options for key in private_keys):
+            raise RuntimeError("MiniMax SP reserved runtime option in caller state")
+        verify = self.verify_pending
+        if verify and not 0 <= self.n_forward < 8:
+            self.destroy()
+            raise RuntimeError("MiniMax SP complete verification accepts exactly eight forwards")
+        profile = bool(os.environ.get("MINIMAX_SP_PROFILE"))
+        sp_options = transformer_options.copy()
+        sp_options[spf.RUNTIME_OPERATION_KEY] = self.operation_id + 1
+        try:
+            t_disp = time.perf_counter()
+            meta = build_meta(x, timestep, context, sp_options, payload)
+            meta["operation_id"] = self.operation_id + 1
+            meta["denoise_mask"] = tensor_meta(denoise_mask)
+            meta["audio_denoise_mask"] = tensor_meta(audio_denoise_mask)
+            dist.broadcast_object_list([meta], src=0, group=self.control_pg)
+            expected = forward_status(meta)
+            replies = [None] * self.world
+            dist.all_gather_object(replies, expected, group=self.control_pg)
+            validate_forward_status(expected, replies)
+            self.operation_id = meta["operation_id"]
+            t_meta = time.perf_counter()
+            device = x[0].device
+            if transformer_options.get("sample_sigmas") is not None:
+                transformer_options["sample_sigmas"] = transformer_options["sample_sigmas"].to(device)
+                sp_options["sample_sigmas"] = transformer_options["sample_sigmas"]
+            for tensor in [*ordered_tensors(x, timestep, context, transformer_options, payload), denoise_mask, audio_denoise_mask]:
+                if tensor is not None:
+                    dist.broadcast(tensor.to(device).contiguous(), src=0, group=self.tensor_pg)
+            if profile:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            out = spf.sp_forward(dit, x, timestep, context, sp_options, payload,
+                                 0, self.world, self.tensor_pg, denoise_mask, audio_denoise_mask)
+            if verify:
+                # No tensor hooks, full-layer hashing, replay, or modified native oracle.
+                reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),
+                    minimax_payload=payload, denoise_mask=denoise_mask, audio_denoise_mask=audio_denoise_mask)
+                checks = native_parity_metrics(out, reference, emit=False)
+                failed = False
+                for check in checks:
+                    finite = (check["finite"] and math.isfinite(check["max_abs"]) and math.isfinite(check["relative"]))
+                    passed = finite and check["relative"] <= 1e-3
+                    row = {"schema_version": 1, "operation_id": self.operation_id, "step": self.n_forward,
+                           "stream": check["label"], "finite": finite,
+                           "max_abs": check["max_abs"] if finite else None,
+                           "relative": check["relative"] if finite else None,
+                           "threshold": 0.001, "passed": passed}
+                    logging.info("[minimax_sp][verify_step] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                    failed = failed or not passed
+                reference = None
+                if failed:
+                    raise RuntimeError("MiniMax SP complete-recipe native parity failed")
+            if profile:
+                torch.cuda.synchronize()
+                logging.info(f"[minimax_sp][profile] step {self.n_forward}: "
+                             f"meta_bcast={1000 * (t_meta - t_disp):.1f}ms "
+                             f"tensor_bcast={1000 * (t0 - t_meta):.1f}ms "
+                             f"sp_forward={1000 * (time.perf_counter() - t0):.1f}ms")
+            # Always count successful forwards, independently of timing logging.
+            self.n_forward += 1
+            return out
+        except comfy.model_management.InterruptProcessingException:
+            self.destroy()
+            raise
+        except Exception:
+            logging.error("[minimax_sp] forward failed; rebuilding the group on the next prompt: complete_recipe_failed")
+            self.destroy()
+            raise
+
     def forward(self, dit, x, timestep, context, transformer_options, payload,
                 denoise_mask=None, audio_denoise_mask=None):
+        if getattr(spf, "SP_COMPLETE_RECIPE", False):
+            return self.forward_complete_recipe(dit, x, timestep, context, transformer_options, payload,
+                                                denoise_mask, audio_denoise_mask)
         self.check_alive()
         if not self.patches_ready:
             raise RuntimeError("MiniMax SP denoise prohibited: patches have not been acknowledged")

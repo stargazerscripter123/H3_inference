@@ -70,7 +70,7 @@ class SPControlTests(unittest.TestCase):
         argv = c.command_arguments(self.launch())
         self.assertEqual(argv.count("--disable-all-custom-nodes"), 1)
         self.assertEqual(argv.count("--whitelist-custom-nodes"), 1)
-        self.assertEqual(argv[argv.index("--whitelist-custom-nodes") + 1:], ["minimax_sp_pdd"])
+        self.assertEqual(argv[argv.index("--whitelist-custom-nodes") + 1], "minimax_sp_pdd")
         self.assertEqual(argv[argv.index("--base-directory") + 1], str(SCRIPTS.parent))
         for slot in ("default", "gpu0", "gpu1"):
             config = c.configuration(self.root, instance=slot)
@@ -78,40 +78,46 @@ class SPControlTests(unittest.TestCase):
             self.assertIn("--disable-all-custom-nodes", argv)
             self.assertNotIn("--whitelist-custom-nodes", argv)
 
-    def test_verify_only_headroom_is_explicit_fingerprinted_and_formal_unchanged(self):
-        diagnostic = self.launch(sp_verify=True)
-        self.assertEqual(diagnostic["diagnostic_vram_headroom_gib"], 4.0)
-        argv = c.command_arguments(diagnostic)
-        self.assertEqual(argv.count("--vram-headroom"), 1)
-        self.assertEqual(argv[argv.index("--vram-headroom") + 1], "4.0")
-        prior = {key: value for key, value in diagnostic.items() if key != "diagnostic_vram_headroom_gib"}
-        self.assertNotEqual(c.fingerprint(diagnostic), c.fingerprint(prior))
-        legacy = {**diagnostic, "diagnostic_vram_headroom_gib": 2.0}
-        self.assertNotEqual(c.fingerprint(diagnostic), c.fingerprint(legacy))
-        for options in ({}, {"sp_profile": True}):
-            formal = self.launch(**options)
-            c.validate_config(formal)
-            self.assertNotIn("diagnostic_vram_headroom_gib", formal)
-            self.assertNotIn("--vram-headroom", c.command_arguments(formal))
+    def test_all_sp_modes_use_same_explicit_headroom_and_other_slots_unchanged(self):
+        for options in ({}, {"sp_profile": True}, {"sp_verify": True},
+                        {"sp_verify": True, "sp_profile": True}):
+            with self.subTest(options=options):
+                config = self.launch(**options)
+                c.validate_config(config)
+                self.assertEqual(config["sp_vram_headroom_gib"], 4.0)
+                self.assertNotIn("diagnostic_vram_headroom_gib", config)
+                argv = c.command_arguments(config)
+                self.assertEqual(argv.count("--vram-headroom"), 1)
+                self.assertEqual(argv[argv.index("--vram-headroom") + 1], "4.0")
+                missing = {key: value for key, value in config.items() if key != "sp_vram_headroom_gib"}
+                legacy = {**missing, "diagnostic_vram_headroom_gib": 4.0}
+                self.assertNotEqual(c.fingerprint(config), c.fingerprint(missing))
+                self.assertNotEqual(c.fingerprint(config), c.fingerprint(legacy))
         for slot in ("default", "gpu0", "gpu1"):
             config = c.configuration(self.root, instance=slot)
+            self.assertNotIn("sp_vram_headroom_gib", config)
             self.assertNotIn("diagnostic_vram_headroom_gib", config)
             self.assertNotIn("--vram-headroom", c.command_arguments({**config, "temp_dir": str(self.root / "temp")}))
 
-    def test_headroom_tampering_and_nondiagnostic_injection_fail_validation(self):
-        diagnostic = self.launch(sp_verify=True)
-        for value in (None, 0, 1, 2.0, 3, "4.0", float("nan")):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
-                c.validate_config({**diagnostic, "diagnostic_vram_headroom_gib": value})
-        missing = {key: value for key, value in diagnostic.items() if key != "diagnostic_vram_headroom_gib"}
-        with self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
-            c.validate_config(missing)
-        for value in (None, 0, 2.0, 4.0):
-            with self.subTest(injected=value), self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
-                c.validate_config({**self.launch(), "diagnostic_vram_headroom_gib": value})
+    def test_headroom_tampering_legacy_and_nonsp_injection_fail_validation(self):
+        for options in ({}, {"sp_profile": True}, {"sp_verify": True}):
+            config = self.launch(**options)
+            missing = {key: value for key, value in config.items() if key != "sp_vram_headroom_gib"}
+            invalid = [missing, {**missing, "diagnostic_vram_headroom_gib": 4.0},
+                       {**config, "diagnostic_vram_headroom_gib": 4.0}]
+            invalid += [{**config, "sp_vram_headroom_gib": value}
+                        for value in (None, 0, 1, 2.0, 3, "4.0", float("nan"))]
+            for candidate in invalid:
+                with self.subTest(options=options, candidate=candidate), self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
+                    c.validate_config(candidate)
+        for slot in ("default", "gpu0", "gpu1"):
+            for key in ("sp_vram_headroom_gib", "diagnostic_vram_headroom_gib"):
+                for value in (None, 0, 4.0):
+                    with self.subTest(slot=slot, key=key, value=value), self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
+                        c.validate_config({**c.configuration(self.root, instance=slot), key: value})
 
     def test_headroom_survives_launch_state_and_sanitized_receipt(self):
-        config = c.configuration(self.root, instance="sp2", sp_verify=True)
+        config = c.configuration(self.root, instance="sp2")
         captured = {}
         def popen(argv, **kwargs):
             captured.update(argv=argv, **kwargs)
@@ -127,15 +133,16 @@ class SPControlTests(unittest.TestCase):
             result = c.start(config, run)
         launch = json.loads(Path(result["config"]).read_text())
         for receipt in (launch, c.read_state(run), c.sanitized(result)):
-            self.assertEqual(receipt["diagnostic_vram_headroom_gib"], 4.0)
+            self.assertEqual(receipt["sp_vram_headroom_gib"], 4.0)
+            self.assertNotIn("diagnostic_vram_headroom_gib", receipt)
         self.assertEqual(result["fingerprint"], c.fingerprint(config))
         with patch.object(c, "owned", return_value=True), patch.object(c, "probe", return_value={"status": "READY"}):
             ready = c.sanitized(c.status(run))
         self.assertEqual(ready["status"], "READY")
-        self.assertEqual(ready["diagnostic_vram_headroom_gib"], 4.0)
+        self.assertEqual(ready["sp_vram_headroom_gib"], 4.0)
 
     def test_wrapper_delivers_native_headroom_argv_before_comfy_import(self):
-        config = self.launch(sp_verify=True)
+        config = self.launch()
         path = self.root / "launch.json"
         path.write_text(json.dumps(config))
         self.addCleanup(setattr, sys, "argv", sys.argv[:])

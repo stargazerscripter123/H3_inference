@@ -388,7 +388,7 @@ def nvfp4_full_m_crop_output(full_output, *, full_rows, global_start, global_sto
     return full_output[global_start:global_stop].clone(memory_format=torch.contiguous_format)
 
 
-FULL_M_DIAGNOSTIC_PROBE_ONLY = True
+FULL_M_DIAGNOSTIC_PROBE_ONLY = False
 FULL_M_ERROR_CODES = ("full_m_scope_invalid", "full_m_input_invalid", "full_m_memory_insufficient",
                      "full_m_preparation_failed", "full_m_execution_failed", "full_m_peer_rejected")
 
@@ -1351,6 +1351,232 @@ def full_head_summary(packets, native):
     return records
 # END reviewed full-sequence FinalLayer diagnostic
 
+# BEGIN reviewed complete SP2 recipe
+SP_COMPLETE_RECIPE = True
+SP_RECIPE_NAME = "nvfp4-fullm-out-fullhead-v1"
+RUNTIME_OPERATION_KEY = "_minimax_sp_runtime_operation_id"
+
+
+def _runtime_ctx_valid(ctx):
+    if ctx.world != 2 or ctx.rank not in (0, 1) or type(ctx.seq_len) is not int or ctx.seq_len < 2:
+        return False
+    splits = [(ctx.seq_len + 1) // 2, ctx.seq_len // 2]
+    return (list(ctx.splits) == splits and ctx.local == splits[ctx.rank]
+            and ctx.start == sum(splits[:ctx.rank]) and ctx.stop == sum(splits[:ctx.rank + 1]))
+
+
+def _runtime_vote(ctx, ready, phase, details=None):
+    flag = torch.tensor([int(ready)], dtype=torch.int32, device="cuda:0")
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)
+    if not bool(flag.item()):
+        logging.info("[minimax_sp][runtime_error] %s", json.dumps(
+            {"schema_version": 1, "rank": ctx.rank, "phase": phase,
+             "code": "local_rejected" if not ready else "peer_rejected", "details": details},
+            sort_keys=True, allow_nan=False))
+        raise RuntimeError("MiniMax SP complete-recipe stage rejected")
+
+
+class DynamicFullMProjection:
+    """Same packed full-M math as the causal probe, without activation hashes or per-target ballots."""
+    def __init__(self, ctx, module):
+        self.ctx, self.module, self.calls = ctx, module, 0
+        self.installation_verified = False
+
+    def execute(self, original, qinput, weight, bias):
+        self.calls += 1
+        ctx = self.ctx
+        buffers = full_input = full_output = crop = None
+        try:
+            if (not self.installation_verified or not _runtime_ctx_valid(ctx) or self.calls != 1
+                    or not isinstance(qinput, comfy.quant_ops.QuantizedTensor)
+                    or qinput._layout_cls != "TensorCoreNVFP4Layout"
+                    or tuple(qinput._params.orig_shape) != (ctx.local, 7168)
+                    or qinput._params.orig_dtype != torch.bfloat16 or qinput._params.transposed
+                    or qinput._qdata.device.type != "cuda" or qinput._qdata.device.index != 0
+                    or self.module.in_features != 7168 or self.module.out_features != 5376):
+                raise RuntimeError("complete_projection_scope_invalid")
+            budget = nvfp4_full_m_budget(local_rows=ctx.local, full_rows=ctx.seq_len,
+                input_cols=7168, global_start=ctx.start, output_cols=5376)
+            free = int(torch.cuda.mem_get_info(qinput._qdata.device)[0])
+            required = max(REPLAY_MINIMUM_FREE_BYTES, budget["conservative_additional_bytes"])
+            if free < required:
+                logging.info("[minimax_sp][runtime_error] %s", json.dumps(
+                    {"schema_version": 1, "rank": ctx.rank, "phase": "projection",
+                     "code": "memory_insufficient", "details": {"free_bytes": free, "required_free_bytes": required}},
+                    sort_keys=True, allow_nan=False))
+                raise RuntimeError("complete_projection_memory_insufficient")
+            buffers = nvfp4_full_m_zero_pad_storage(qinput._qdata, qinput._params.block_scale,
+                qinput._params.scale, local_rows=ctx.local, full_rows=ctx.seq_len,
+                input_cols=7168, global_start=ctx.start, allocation_limit_bytes=budget["helper_extra_bound_bytes"])
+            params = dataclasses.replace(qinput._params, orig_shape=(ctx.seq_len, 7168),
+                                         block_scale=buffers["block_scale"])
+            if (params.scale is not qinput._params.scale or params.orig_dtype != qinput._params.orig_dtype
+                    or params.transposed != qinput._params.transposed):
+                raise RuntimeError("complete_projection_params_changed")
+            full_input = type(qinput)(buffers["qdata"], qinput._layout_cls, params)
+            full_output = original(full_input, weight, bias)
+            crop = nvfp4_full_m_crop_output(full_output, full_rows=ctx.seq_len,
+                global_start=ctx.start, global_stop=ctx.stop, output_cols=5376)
+            return crop
+        finally:
+            buffers = full_input = full_output = None
+
+
+class CompleteOutProjScope:
+    """Fresh every forward. Restore owned wrappers on every exit; never fall back on failure.
+
+    A local in-loop failure has no out-of-order emergency ballot. Its peer exits
+    through existing communication errors/timeouts and owned group cleanup.
+    """
+    def __init__(self, dit, ctx):
+        self.dit, self.ctx = dit, ctx
+        self.saved, self.probes, self.errors = [], [], []
+        self.entered = False
+        self.installed = False
+
+    def __enter__(self):
+        if self.entered:
+            raise RuntimeError("complete_projection_scope_reentry")
+        self.entered = True
+        try:
+            if not _runtime_ctx_valid(self.ctx) or len(self.dit.blocks) != 50:
+                raise RuntimeError("complete_projection_scope_invalid")
+            for block in self.dit.blocks:
+                module = block.attn.out_proj
+                if (module.in_features != 7168 or module.out_features != 5376
+                        or getattr(module, "pre_quant_scale", None) is not None
+                        or getattr(module, "input_scale", None) is not None
+                        or getattr(module, "quant_format", None) != "nvfp4"
+                        or getattr(module, "layout_type", None) != "TensorCoreNVFP4Layout"
+                        or getattr(module, "_full_precision_mm", False)
+                        or getattr(module, "comfy_force_cast_weights", False)
+                        or getattr(module, "weight_function", ()) or getattr(module, "bias_function", ())):
+                    raise RuntimeError("complete_projection_module_invalid")
+                if any(saved[0] is module for saved in self.saved):
+                    raise RuntimeError("complete_projection_module_alias")
+                previous, original = vars(module).get("_forward", _ABSENT), module._forward
+                probe = DynamicFullMProjection(self.ctx, module)
+                def wrapped(qinput, weight, bias, target=probe, saved=original):
+                    return target.execute(saved, qinput, weight, bias)
+                self.saved.append((module, previous, wrapped))
+                self.probes.append(probe)
+                module._forward = wrapped
+            self.installed = True
+        except Exception:
+            self.errors.append("complete_projection_install_failed")
+        return self
+
+    def vote_ready(self):
+        try:
+            ready = (self.installed and not self.errors and len(self.saved) == len(self.probes) == 50
+                     and all(module._forward is wrapped for module, _old, wrapped in self.saved))
+        except Exception:
+            ready = False
+        _runtime_vote(self.ctx, ready, "installation")
+        for probe in self.probes:
+            probe.installation_verified = True
+
+    def __exit__(self, kind, value, traceback):
+        complete = self.installed and len(self.probes) == 50 and all(probe.calls == 1 for probe in self.probes)
+        for module, previous, wrapped in reversed(self.saved):
+            try:
+                if module._forward is not wrapped:
+                    raise RuntimeError("complete_projection_restore_failed")
+                if previous is _ABSENT:
+                    delattr(module, "_forward")
+                else:
+                    module._forward = previous
+            except Exception:
+                self.errors.append("complete_projection_restore_failed")
+        self.saved.clear()
+        self.installed = False
+        if kind is None and (not complete or self.errors):
+            raise RuntimeError("complete_projection_calls_or_restore_invalid")
+        return False
+
+
+def complete_head_budget(video_seg, audio_seg, ctx):
+    rows = [seg[1] - seg[0] for seg in (video_seg, audio_seg)]
+    crops = [max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start)) for seg in (video_seg, audio_seg)]
+    gather = 2 * max(ctx.splits) * 5376 * 2
+    send = max(ctx.splits) * 5376 * 2
+    scratch = max(rows) * 5376 * 12
+    weights = (3072 + 1024) * 5376 * 4
+    outputs = sum(n * w * 4 for n, w in zip(rows, (96, 32)))
+    clones = sum(n * w * 4 for n, w in zip(crops, (96, 32)))
+    return max(1024**3, max(gather + send, gather + scratch + weights + outputs + clones) + 256 * 1024**2)
+
+
+def full_head_execute(dit, h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts, ctx):
+    send = gathered = full_h = v_full = a_full = v_local = a_local = output = None
+    prepared = False
+    details = None
+    try:
+        if (not _runtime_ctx_valid(ctx) or not isinstance(h, torch.Tensor) or h.dtype != torch.bfloat16
+                or tuple(h.shape) != (ctx.local, 5376) or h.device.type != "cuda" or h.device.index != 0
+                or h.requires_grad or not h.is_contiguous() or sample_sigmas is None
+                or dit.final_layer.video_dim != 96):
+            raise RuntimeError("complete_head_scope_invalid")
+        for seg in (video_seg, audio_seg):
+            if (len(seg) != 3 or type(seg[0]) is not int or type(seg[1]) is not int
+                    or not 0 <= seg[0] < seg[1] <= ctx.seq_len):
+                raise RuntimeError("complete_head_segments_invalid")
+        if audio_seg[1] != video_seg[0] or video_seg[1] != ctx.seq_len:
+            raise RuntimeError("complete_head_segment_order_invalid")
+        required = complete_head_budget(video_seg, audio_seg, ctx)
+        free = int(torch.cuda.mem_get_info(h.device)[0])
+        details = {"free_bytes": free, "required_free_bytes": required}
+        if free < required:
+            raise RuntimeError("complete_head_memory_insufficient")
+        send = torch.zeros((max(ctx.splits), 5376), dtype=h.dtype, device=h.device)
+        send[:ctx.local].copy_(h)
+        gathered = torch.empty((2 * max(ctx.splits), 5376), dtype=h.dtype, device=h.device)
+        prepared = True
+    except Exception:
+        send = gathered = None
+    _runtime_vote(ctx, prepared, "full_head_preparation", details)
+    dist.all_gather_into_tensor(gathered, send, group=ctx.group)
+    send = None
+    complete = False
+    try:
+        # With exactly two balanced shards, the only optional padding is at the end.
+        full_h = gathered[:ctx.seq_len]
+        v_full, a_full = dit.final_layer(full_h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts)
+        for output, seg, width in ((v_full, video_seg, 96), (a_full, audio_seg, 32)):
+            if (not isinstance(output, torch.Tensor) or output.dtype != torch.float32
+                    or tuple(output.shape) != (seg[1] - seg[0], width)
+                    or output.device != h.device or output.requires_grad):
+                raise RuntimeError("complete_head_output_invalid")
+        del output
+        def crop(output, seg):
+            lo, hi = max(seg[0], ctx.start), min(seg[1], ctx.stop)
+            if hi <= lo:
+                return output[:0].clone(memory_format=torch.contiguous_format)
+            return output[lo - seg[0]:hi - seg[0]].clone(memory_format=torch.contiguous_format)
+        v_local, a_local = crop(v_full, video_seg), crop(a_full, audio_seg)
+        complete = True
+    except Exception:
+        v_local = a_local = None
+    finally:
+        send = gathered = full_h = v_full = a_full = output = None
+    _runtime_vote(ctx, complete, "full_head_execution", details)
+    return v_local, a_local
+
+
+def complete_runtime_receipt(ctx, operation_id, scale_scope, out_scope):
+    counts = scale_scope.counts()
+    if (not _runtime_ctx_valid(ctx) or type(operation_id) is not int or operation_id < 1
+            or counts != {"target_forwards": 200, "activation_syncs": 200, "per_block": [4] * 50}
+            or len(out_scope.probes) != 50 or any(probe.calls != 1 for probe in out_scope.probes)
+            or out_scope.installed or out_scope.errors):
+        raise RuntimeError("complete_runtime_counts_invalid")
+    return {"schema_version": 1, "recipe": SP_RECIPE_NAME, "operation_id": operation_id,
+        "rank": ctx.rank, "world": 2, "seq_len": ctx.seq_len, "splits": list(ctx.splits),
+        "global_start": ctx.start, "global_stop": ctx.stop, "input_dtype": "torch.bfloat16",
+        "out_proj_calls": 50, "activation_syncs": 200, "final_layer_calls": 1,
+        "installation_ballots": 1, "full_head_ballots": 2, "diagnostic_hashes": 0, "replay_calls": 0}
+# END reviewed complete SP2 recipe
+
 # BEGIN reviewed SP2 activation amax scope
 _SP_NVFP4_TICKET = ContextVar('minimax_sp_nvfp4_activation_ticket', default=None)
 _SP_NVFP4_LOCK = threading.Lock()
@@ -1859,19 +2085,22 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(dit.blocks), device, transformer_options)
     # BEGIN reviewed block0 trace scope
     trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop, sp_ctx=ctx)
-             if ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True else None)
+             if not SP_COMPLETE_RECIPE and ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True else None)
     # END reviewed block0 trace scope
     # BEGIN reviewed SP2 activation amax loop
     scale_context = (SPNVFP4AmaxScope(dit, ctx, torch_module=torch, dist_module=dist,
                                     quant_ops=comfy.quant_ops) if ctx.world == 2 else nullcontext())
-    with scale_context as scale_scope, (trace if trace is not None else nullcontext()):
-        if trace is not None:
+    runtime_scope = CompleteOutProjScope(dit, ctx) if SP_COMPLETE_RECIPE and ctx.world == 2 else None
+    with scale_context as scale_scope, (runtime_scope if runtime_scope is not None else (trace if trace is not None else nullcontext())):
+        if runtime_scope is not None:
+            runtime_scope.vote_ready()
+        elif trace is not None:
             full_m_installation_vote(trace, ctx)
         for i, block in enumerate(dit.blocks):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
             transformer_options["block_index"] = i
             h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)
-    if ctx.world == 2 and os.environ.get("MINIMAX_SP_VERIFY") == "1":
+    if not SP_COMPLETE_RECIPE and ctx.world == 2 and os.environ.get("MINIMAX_SP_VERIFY") == "1":
         counts = scale_scope.counts()
         logging.info("[minimax_sp][amax_sync] rank=%d target_forwards=%d activation_syncs=%d per_block=%s",
                      rank, counts["target_forwards"], counts["activation_syncs"], counts["per_block"])
@@ -1898,7 +2127,10 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
         if trace is not None:
             trace.capture_head_metadata(dit.final_layer)
-        if trace is not None:
+        if runtime_scope is not None:
+            v_local, a_local = full_head_execute(dit, h, t_emb, video_seg, audio_seg,
+                sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a), ctx)
+        elif trace is not None:
             v_local, a_local, trace.full_head = full_head_probe(dit, h, t_emb, video_seg, audio_seg,
                 sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a), ctx)
         else:
@@ -1907,6 +2139,9 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
         v = _gather_rows(v_local, counts_for(video_seg), ctx, v_local.shape[-1], device)
         a = _gather_rows(a_local, counts_for(audio_seg), ctx, a_local.shape[-1], device)
+    if runtime_scope is not None:
+        receipt = complete_runtime_receipt(ctx, transformer_options.get(RUNTIME_OPERATION_KEY), scale_scope, runtime_scope)
+        logging.info("[minimax_sp][runtime_step] %s", json.dumps(receipt, sort_keys=True, allow_nan=False))
     # BEGIN reviewed block0 trace gather
     if trace is not None:
         packets = [None] * ctx.world

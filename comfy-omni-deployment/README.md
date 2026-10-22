@@ -1,6 +1,16 @@
 # FastH3 Omni 原生 ComfyUI 对照
 
-## 双实例与 SP2 实验入口（2026-10-22，GPU验证进行中）
+## 当前双卡单请求候选（2026-10-22）
+
+当前只继续SP2单payload，两张5090共同执行同一次请求的每个去噪步骤；没有将high/low或8步拆成两组。此前双实例测试已按用户要求停止。最新首步因果实验在原1e-3门槛下通过：视频/音频误差均为0，100个主干层rank窗口哈希与native全部相同；实验在首步后主动结束，没有完整视频或正式速度成绩。
+
+本候选将已验证的计算方式推广到每一步和动态序列长度：50个out_proj复用原NVFP4量化数据，在原全局行位置保持native完整M尺寸；主干h以原BF16汇总，两rank调用原FinalLayer再裁剪各自输出。正式与verify使用完全相同的计算和`sp_vram_headroom_gib=4.0`资源设置。每forward保留200次activation-amax同步，新增1次安装票和2次full-head票；这些数字不含其他原生通信，不能当作总collective数。
+
+新验证对三条真实业务请求各跑完整8步，每步video/audio均与原生forward比较（每case16条，阈值1e-3）；正式关闭verify/profile，不安装历史trace/hash/replay。只有同commit、contract、权重、协议和sealed plans的三case诊断全部成功、完整MP4有效且owned正常停止/两次空闲检查通过，操作runner才允许3×4正式对照。代码契约本身不等于GPU验收。完整8步、正式速度和人工质量仍待验证。
+
+## 实验入口与历史排错记录
+
+以下首步trace/hash/replay、2GiB诊断资源和禁止首步后继续等描述，是对应历史版本的行为，已由上面的完整候选取代；历史结果保留用于说明修复依据。当前有效契约见[sp-node-contract.json](sp-node-contract.json)的`runtime_recipe`。
 
 新增 `--instance gpu0`（GPU0、8189）与 `--instance gpu1`（GPU1、8190），分别拥有独立的状态锁、输入、输出、用户目录和临时目录。默认实例继续使用原8188；同一GPU的实例互斥，停止仍必须匹配本实例owner/PID/启动时刻/进程组。两个单卡实例并发衡量吞吐量，不等于一次请求的TP/SP。
 
@@ -8,14 +18,14 @@
 
 节点来自[buqi-minimax-h3-multigpu](https://github.com/buqi-code/buqi-minimax-h3-multigpu/tree/a864277f81ee7609972eb64cd1fb086f239d4c99)，保留MIT许可证，本地补丁让最终视频/音频all-gather采用实际输出宽度，以适配本模型32个PDD输出头，并使用目标Torch提供的`all_gather_into_tensor` API。每个文件SHA和补丁边界见[sp-node-contract.json](sp-node-contract.json)。这是复制DiT权重、切分序列的Ulysses SP，未实现DiT TP。原生`MultiGPU CFG Split`在本CFG1配方上不提供所需TP/SP加速。
 
-`--sp-verify --sp-profile`仅可用于sp2诊断：首个SP forward额外与原生forward比较，且逐步同步计时。该诊断不计入正式速度。必须先通过真实双卡数值检查与正常清理，再关闭这两个开关做正式对照。初次GPU诊断在最终gather处因上游调用不存在的`all_gather_single`而失败；API修复后，第二次诊断完成了首个双卡forward，但video的最大绝对误差/原生输出最大绝对值为0.16927083，超过0.001门槛，生成被数值检查拒绝。两次均无有效视频，owned实例正常停止并通过两次空闲检查。新增失败诊断会先记录video/audio两组指标，再在同一已加载模型上显式运行world1的SP镜像（collective仅作本地复制），输出其与native的对照后仍拒绝原失败请求；门槛不变，正式路径不增加forward。该诊断用于区分镜像实现与分片差异，不能作为速度成绩。当前只继续单payload双卡SP2；双实例已按用户要求停止，10条已完成视频保留，2条在途请求中断，剩余12条未提交。SP2正式性能和质量均未通过验收。
+历史首步版本的`--sp-verify --sp-profile`仅可用于sp2诊断：首个SP forward额外与原生forward比较，且逐步同步计时。该诊断不计入正式速度。必须先通过真实双卡数值检查与正常清理，再关闭这两个开关做正式对照。初次GPU诊断在最终gather处因上游调用不存在的`all_gather_single`而失败；API修复后，第二次诊断完成了首个双卡forward，但video的最大绝对误差/原生输出最大绝对值为0.16927083，超过0.001门槛，生成被数值检查拒绝。两次均无有效视频，owned实例正常停止并通过两次空闲检查。新增失败诊断会先记录video/audio两组指标，再在同一已加载模型上显式运行world1的SP镜像（collective仅作本地复制），输出其与native的对照后仍拒绝原失败请求；门槛不变，正式路径不增加forward。该诊断用于区分镜像实现与分片差异，不能作为速度成绩。当前只继续单payload双卡SP2；双实例已按用户要求停止，10条已完成视频保留，2条在途请求中断，剩余12条未提交。SP2正式性能和质量均未通过验收。
 
-第三次诊断在同一业务首步上确认：world1的SP镜像与原生forward的视频和音频最大绝对误差均为0；SP2对应最大相对误差为0.16927083和0.054733728。该证据将问题缩小到跨rank路径，并未单独证明量化是唯一原因。当前候选在50个block的四个NVFP4投影输入量化前，用SP组标量MAX同步动态amax，保留原生除法/舍入顺序、固定input scale与权重；每rank每forward预期200次同步。作用域在block loop结束时恢复，world1与rank0原生oracle不参与。实际权重200个投影均缺省input_scale；第四次GPU诊断确认两rank各完成200次同步；视频/音频最大相对误差降至0.103515625/0.044378698，world1镜像两者仍为0，但仍未通过0.001门槛，无有效SP2视频或性能成绩。
+第三次诊断在同一业务首步上确认：world1的SP镜像与原生forward的视频和音频最大绝对误差均为0；SP2对应最大相对误差为0.16927083和0.054733728。该证据将问题缩小到跨rank路径，并未单独证明量化是唯一原因。当时的候选在50个block的四个NVFP4投影输入量化前，用SP组标量MAX同步动态amax，保留原生除法/舍入顺序、固定input scale与权重；每rank每forward预期200次同步。作用域在block loop结束时恢复，world1与rank0原生oracle不参与。实际权重200个投影均缺省input_scale；第四次GPU诊断确认两rank各完成200次同步；视频/音频最大相对误差降至0.103515625/0.044378698，world1镜像两者仍为0，但仍未通过0.001门槛，无有效SP2视频或性能成绩。
 
 所有服务绑定loopback；实验复用已密封的业务协议，cap480参考、480×832/362帧/24fps/8步/CFG1，逐次换seed。视频和抽帧由用户人工审阅。与FastVideo对照仍是完整部署配方比较，Comfy使用dense attention及FP16视频VAE。
 
 
-这是独立单 GPU 部署包，使用重装后的 `popos-5090`、GPU1 和 loopback `127.0.0.1:8188`。截至2026-10-21 UTC，固定环境已安装，三条业务请求各1首推+3warm，共12/12通过执行与完整MP4元数据检查；人工画面、声音和参考一致性验收仍待完成。此状态取代早期“仅本地模拟验证”的描述，不代表服务此后持续运行；查当前状态使用下方controller。本包不会启动或停止FastVideo。
+默认入口是独立单 GPU 部署，使用重装后的 `popos-5090`、GPU1 和 loopback `127.0.0.1:8188`。截至2026-10-21 UTC，固定环境已安装，三条业务请求各1首推+3warm，共12/12通过执行与完整MP4元数据检查；人工画面、声音和参考一致性验收仍待完成。此状态取代早期“仅本地模拟验证”的描述，不代表服务此后持续运行；查当前状态使用下方controller。本包不会启动或停止FastVideo。
 
 第五次GPU诊断确认block 0四个投影输入/输出及block出口的18组采样比较均为0误差，完整tensor的amax也相同；最终视频/音频的最大相对误差仍为0.10351562/0.044378698，world1镜像仍为0。该证据只覆盖各rank固定7行的全部feature，不能扩展成全层逐元素相同。
 
@@ -23,11 +33,11 @@
 
 ## 固定配方
 
-- ComfyUI `0.42.0`，commit `b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c`；`comfy-kitchen==0.2.39`。不需要自定义节点。
+- ComfyUI `0.42.0`，commit `b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c`；`comfy-kitchen==0.2.39`。默认单卡不需要自定义节点，SP2使用上面固定的唯一节点。
 - 独立源码 `src/ComfyUI-Omni`，独立环境 `envs/comfy-omni`；已验证Python3.12.15、Torch2.12.0+cu130、Torchvision0.27.0+cu130。
 - 本pin的H3 attention执行 **dense forward**；源码虽保留VSA gate参数，但该forward不使用它，实际调用`optimized_attention`。本部署未启用VSA稀疏补丁，且controller强制`--disable-all-custom-nodes`。不能将FastVideo的VSA加速配方视为此原生Comfy图已经具备的功能。
 - 四个模型共35,274,204,555 bytes。具体 Hugging Face revision、文件名、目标目录、大小及 SHA256 全部在 [pins.json](pins.json)。DiT 是 Comfy 专用 NVFP4 QAD；文本编码器是含 vision 的 Qwen3-VL-32B NVFP4 AWQ；视频 VAE 是完整 FP16，音频 VAE 是 FP32。
-- 输出宽480×高832、362帧、24fps；Euler / simple、8步PDD配方、BasicGuider（CFG1）、video/audio shift12/3；无额外LoRA。客户端证明采样节点执行且非整图缓存；未对每次CUDA forward单独插桩计数。
+- 输出宽480×高832、362帧、24fps；Euler / simple、8步PDD配方、BasicGuider（CFG1）、video/audio shift12/3；无额外LoRA。客户端证明采样节点执行且非整图缓存；默认单卡未对每次CUDA forward单独插桩计数，当前SP2在两rank记录每步完成回执。
 
 [官方 QAD 验证](https://huggingface.co/FastVideo/FastH3-Omni-NVFP4-QAD-Comfy/blob/36dbf15cd11113471114b1040c4f38646c031549/provenance/VALIDATION.md)使用同一 Comfy pin，但硬件为GB200、124帧，Torch为2.9开发版。下面是本机实测，不能用官方数据替代。此处使用单GPU、dense attention和完整FP16视频VAE；FastVideo对照使用双GPU SP2、VSA与36L NVFP4 decoder。比较的是整套部署配方，不能把差值归因于单一框架、GPU数量或attention实现。音频VAE保留FP32；不要用全局`--fp16-vae`覆盖音频精度。
 
@@ -129,7 +139,7 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 
 第九次GPU诊断确认block34 out_proj的实际NVFP4输入数据、逻辑block scales、动态尺度及cast后的权重/bias哈希均与native一致。native调用内仅余269,746,176字节（约257MiB）物理空闲显存，低于原1GiB保护门槛，两个分片复播均主动跳过；不能据此确认矩阵尺寸是误差原因。旧采样、100条层出口哈希及16条投影哈希仍完整，最终数值门槛仍失败，无SP2视频。
 
-`sp2 --sp-verify`启动现在固定使用原生`--vram-headroom 2.0`，为DynamicVRAM在每张卡额外预留2GiB；字段`diagnostic_vram_headroom_gib=2.0`进入配置指纹及启动/READY回执。worker继承相同值。正式SP2、单卡和仅profile模式不增加headroom；模型、原native oracle、量化及1GiB复播保护均不变。该启动设置已通过CPU测试，目标投影处的实际可用显存及复播结果仍待GPU验证。
+第九次诊断后的历史`sp2 --sp-verify`启动固定使用原生`--vram-headroom 2.0`，为DynamicVRAM在每张卡额外预留2GiB；字段`diagnostic_vram_headroom_gib=2.0`进入配置指纹及启动/READY回执。worker继承相同值。正式SP2、单卡和仅profile模式不增加headroom；模型、原native oracle、量化及1GiB复播保护均不变。该启动设置已通过CPU测试，目标投影处的实际可用显存及复播结果仍待GPU验证。
 
 第十次GPU诊断使用额外2GiB headroom，目标位置实测空闲2,417,229,824字节，两次同GPU复播成功。rank0的121,411,584元素仅1处不同（绝对差0.5，按原生窗口最大值归一化为3.310381e-5），rank1的121,406,208元素全部一致；两个分片复播结果逐字节重现真实SP输出。相应量化数据、逻辑scales、动态尺度及实际cast W/B一致，证明M尺寸及相关布局变化可以复现首次差异，但未识别具体backend/kernel。最终视频/音频相对误差仍为0.10351562/0.044378698，原门槛未通过。
 
@@ -137,9 +147,14 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 
 第十一次GPU单点干预确认block34两rank的全部16条投影输入/输出哈希均与native一致，block34层出口也一致；首次完整层出口差异移至rank0 block35、rank1 block36。最终video/audio相对误差为0.10453869/0.039940828，world1镜像仍为0，原门槛未通过。此结果证明block34的单点差异可消除，不能扩展成整条SP2已修复。
 
-当前实验统一在50层的out_proj保持原生M尺寸，qkv/fc投影保留原路径。每rank有50个干预点、共100条记录；独立module post-hook核对实际返回crop的SHA。只有block34具有额外native实际量化输入/权重对照，其他98条只证明source-local值和原全局行位置被保留，不冒称native量化逐位验证；这些crop也不与block残差出口哈希混绑。每rank增加1次共享安装票及100次target准备/执行票，原200次activation amax同步保持。正式生成与首步后的继续执行仍禁止；all50实验已完成GPU验证：两rank的100个完整主干层窗口哈希全部与native一致，所有116组采样误差为0；最终audio误差0、video最大绝对误差0.03125/相对误差0.0029761905，仍未通过原0.001门槛，不提供速度结论。
+第十二次实验统一在50层的out_proj保持原生M尺寸，qkv/fc投影保留原路径。每rank有50个干预点、共100条记录；独立module post-hook核对实际返回crop的SHA。只有block34具有额外native实际量化输入/权重对照，其他98条只证明source-local值和原全局行位置被保留，不冒称native量化逐位验证；这些crop也不与block残差出口哈希混绑。每rank增加1次共享安装票及100次target准备/执行票，原200次activation amax同步保持。正式生成与首步后的继续执行仍禁止；all50实验已完成GPU验证：两rank的100个完整主干层窗口哈希全部与native一致，所有116组采样误差为0；最终audio误差0、video最大绝对误差0.03125/相对误差0.0029761905，仍未通过原0.001门槛，不提供速度结论。
 
 
-下一诊断仅改变最终输出阶段：主干仍双卡SP2，all50 out_proj保持已验证的full-M方案；随后以原BF16 dtype汇总完整h，两rank调用原FinalLayer及原全局video/audio段，再将返回值按原rank窗口裁剪并走既有最终gather。原生oracle、world1镜像、PDD公式与1e-3门槛保持不变；首步实验之后仍主动停止，正式生成关闭。此干预同时覆盖norm/modulation、PDD有效头及其矩阵执行形状，不能单独归因于某个GEMM或CUDA算法。新增通信缓冲及输出头临时内存有实际显存预算检查，分配/执行失败经双rank同步后终止；尚未GPU验证。
+第十三次诊断仅改变最终输出阶段：主干仍双卡SP2，all50 out_proj保持已验证的full-M方案；随后以原BF16 dtype汇总完整h，两rank调用原FinalLayer及原全局video/audio段，再将返回值按原rank窗口裁剪并走既有最终gather。原生oracle、world1镜像、PDD公式与1e-3门槛保持不变；首步实验之后仍主动停止，正式生成关闭。此干预同时覆盖norm/modulation、PDD有效头及其矩阵执行形状，不能单独归因于某个GEMM或CUDA算法。新增通信缓冲及输出头临时内存有实际显存预算检查，分配/执行失败经双rank同步后终止；尚未GPU验证。
 
 完整输出头诊断显式把verify-only的DynamicVRAM headroom从2.0提高到4.0GiB，用于新增完整h和FinalLayer临时量；仍按运行入口实际空闲显存检查保守预算。单卡、双实例、正式SP与profile-only默认不改变。headroom是诊断资源设置，不能作为正式速度或真实空闲显存的证明。
+
+
+完整输出阶段的首步因果诊断已在双5090通过：video/audio最大绝对误差和相对误差均为0，100个主干窗口SHA均与native一致，且owned实例正常停止、两次空闲检查通过。该运行按设计在首步后停止，没有完整视频或正式速度成绩。
+
+当前候选将已验证的数学路径用于每一次SP2 forward，按实际序列长度动态分片：50个out_proj保持原生M，主干h以BF16汇总后调用原FinalLayer。正式路径不安装trace/hash/replay，不加原诊断的100次target投票；每步保留200次global-amax同步、1次安装票和2次full-head票。verify与正式均显式sp_vram_headroom_gib=4.0，单卡和双实例入口不变。完整诊断对三条业务请求逐条运行8步，每步video/audio均与未改动native比较（每case16条数值，1e-3阈值）；只有同commit/契约/权重/输入且全3case通过、有效MP4与正常清理的诊断证据才能解锁正式3×4对照。该完整8步与正式速度尚未上机验收。

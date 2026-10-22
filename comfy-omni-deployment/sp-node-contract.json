@@ -8,8 +8,8 @@
   "files": {
     "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
     "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
-    "minimax_sp/sp_forward.py": "b76f910dfcc7dd65e92dc0b653d4a268bf66f0e931a785b0dd02a1540427d1c9",
-    "minimax_sp/sp_group.py": "c1a92bbcd5b88e78e362c9cb3c57b45c6e54ad306fcc333f626b6d769901694b",
+    "minimax_sp/sp_forward.py": "2df1dc4d7d667dd3a0168d9f3ac6030d96eab019c513e758c97851b514f897da",
+    "minimax_sp/sp_group.py": "de6e6b5ec81b06bb0a622ba3ac1d24c53b75c212e1d7791fb5503619ea46c034",
     "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
     "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
@@ -24,11 +24,11 @@
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
   },
   "local_patch": {
-    "id": "omni-sp2-all-out-full-m-full-head-probe-v12",
+    "id": "omni-sp2-complete-full-m-full-head-v13",
     "path": "minimax_sp/sp_forward.py",
     "source_sha256": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
-    "patched_sha256": "b76f910dfcc7dd65e92dc0b653d4a268bf66f0e931a785b0dd02a1540427d1c9",
-    "description": "Use the actual returned video/audio tensor width for PDD final all-gather, and use the public all_gather_into_tensor API supported by the installed PyTorch 2.12.0+cu130 runtime. Padding, rank order and float32 gather buffers are unchanged.",
+    "patched_sha256": "2df1dc4d7d667dd3a0168d9f3ac6030d96eab019c513e758c97851b514f897da",
+    "description": "Complete every-forward dynamic SP2 recipe preserving native full-M out projection and full-sequence original FinalLayer geometry, plus existing PDD output widths, public gather API and global activation amax.",
     "changes": [
       "video gather out_dim: dit.final_layer.video_out.out_features -> v_local.shape[-1]",
       "audio gather out_dim: dit.final_layer.audio_out.out_features -> a_local.shape[-1]",
@@ -42,7 +42,8 @@
       "Verification only: compare actual NVFP4 inputs and cast weights at block34 out_proj, then replay native full-M projection with two actual shard-M windows using the same cast weight/bias and fixed input scale; original native result and gate unchanged",
       "Diagnostic-only first SP2 forward block34 out_proj: preserve native full-M packed layout with original rank row offsets and zero other rows, clone returned rank crop; formal use and continuation beyond the first diagnostic step are rejected.",
       "Diagnostic-only first SP2 forward: apply packed full-M padding to all50 attn.out_proj using one shared installation ballot and 100 target ballots per rank. Bind every returned crop with an independent module post-hook; native oracle, all other projections and original threshold remain unchanged.",
-      "Diagnostic-only first SP2 forward: gather complete backbone h in its original BF16 dtype, call the unchanged native FinalLayer with global segments on both ranks, clone old local output windows and use existing final output gathers. Bind gathered input windows to native and SP block49 SHA; retain original native threshold and first-step-only termination."
+      "Diagnostic-only first SP2 forward: gather complete backbone h in its original BF16 dtype, call the unchanged native FinalLayer with global segments on both ranks, clone old local output windows and use existing final output gathers. Bind gathered input windows to native and SP block49 SHA; retain original native threshold and first-step-only termination.",
+      "Complete every SP2 forward: dynamic original rank windows, all50 packed full-M out projections without per-target diagnostic ballots, original BF16 full-h gather and native FinalLayer. Original native oracle unchanged; optional verification covers all8 forwards and both streams. Formal and verification use the same 4GiB headroom and math, with cheap per-rank runtime receipts."
     ],
     "actual_model_contract": {
       "pdd_steps": 32,
@@ -58,10 +59,10 @@
       "fixed input scales",
       "native quantization rounding order"
     ],
-    "previous_patched_sha256": "985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb"
+    "previous_patched_sha256": "b76f910dfcc7dd65e92dc0b653d4a268bf66f0e931a785b0dd02a1540427d1c9"
   },
   "validation": {
-    "cpu_shape_and_ast_tests": 95,
+    "cpu_shape_and_ast_tests": 109,
     "gpu_tested": false,
     "full_forward_parity_tested": false,
     "full_forward_parity_passed": false,
@@ -70,7 +71,7 @@
       "threshold": 0.001,
       "formal_outputs": 0
     },
-    "scope": "All50 out_proj full-M made all100 backbone rank-window hashes identical to native; audio final is exact, video relative remains 0.0029761905. Full final-layer gathered-h diagnostic awaits GPU validation; no formal generation.",
+    "scope": "First-forward causal probe achieved exact native video/audio and all100 backbone hashes; current generalized every-forward recipe still requires three complete eight-step GPU diagnostics.",
     "previous_global_amax_gpu_result": {
       "video_relative_max": 0.103515625,
       "audio_relative_max": 0.044378698,
@@ -140,14 +141,27 @@
       "audio_relative": 0.0,
       "native_parity_passed": false,
       "formal_outputs": 0
-    }
+    },
+    "previous_full_head_intervention": {
+      "video_max_abs": 0.0,
+      "video_relative": 0.0,
+      "audio_max_abs": 0.0,
+      "audio_relative": 0.0,
+      "layer_hash_rows": 100,
+      "all_layer_hashes_match": true,
+      "native_parity_passed": true,
+      "forwards_verified": 1,
+      "complete_video_generated": false,
+      "formal_outputs": 0
+    },
+    "cpu_package_tests": 160
   },
-  "scope": "Diagnostic-only all50 out_proj full-M plus gathered-h native FinalLayer experiment. Original native oracle and numerical threshold unchanged; formal use and continuation past first diagnostic step remain rejected.",
+  "scope": "Complete SP2 candidate: dynamic full-M out projections and dtype-preserving full-sequence native FinalLayer on every forward. Formal use requires a matching successful three-case, eight-step native-parity diagnostic record; current GPU acceptance is pending.",
   "diagnostic_patch": {
     "path": "minimax_sp/sp_group.py",
     "source_sha256": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
-    "patched_sha256": "c1a92bbcd5b88e78e362c9cb3c57b45c6e54ad306fcc333f626b6d769901694b",
-    "scope": "Verification-only original native gate and failed-parity world1 mirror; full-M diagnostic evidence logged separately. Formal requests are rejected before group creation; after successful first-step parity this diagnostic-only version also stops without generating a video."
+    "patched_sha256": "de6e6b5ec81b06bb0a622ba3ac1d24c53b75c212e1d7791fb5503619ea46c034",
+    "scope": "Complete SP2 dispatch counts every successful forward independently of profiling, emits video/audio native parity for all8 steps only in verify mode, and preserves original native oracle. Formal has no native oracle/profile/hash/replay; operator runner requires matching complete3case diagnostic evidence."
   },
   "activation_scale_patch": {
     "path": "minimax_sp/sp_forward.py",
@@ -164,7 +178,7 @@
     "native_parity_passed": false
   },
   "block0_diagnostic_patch": {
-    "scope": "verify mode first SP2 forward only",
+    "scope": "Historical inactive first-step diagnostic; verify mode first SP2 forward only",
     "sampled_rows_per_rank": 7,
     "points": [
       "attn.qkv_proj.pre",
@@ -180,10 +194,11 @@
     "comparison": "same global rows, all features; samples are internal CPU copies; logs contain only scalar summaries and row/shape metadata",
     "limitations": "Sampled rows do not prove full-layer equivalence; out_proj.pre combines qk norm, RoPE, communication and attention.",
     "cleanup": "forward hooks removed in scope finally; samples discarded before failure mirror; caller options never contain trace state",
-    "gpu_tested": true
+    "gpu_tested": true,
+    "active": false
   },
   "layer_exit_diagnostic_patch": {
-    "scope": "verify first SP2 forward only",
+    "scope": "Historical inactive first-step diagnostic; verify first SP2 forward only",
     "points_per_rank": 58,
     "sampled_rows_per_rank": 7,
     "block_exits": [
@@ -239,16 +254,18 @@
       49
     ],
     "gpu_tested": true,
-    "limitations": "Fixed sampled rows do not prove complete tensor equality; no formal-path trace"
+    "limitations": "Fixed sampled rows do not prove complete tensor equality; no formal-path trace",
+    "active": false
   },
   "final_head_metadata_diagnostic": {
-    "scope": "verify mode only, both SP ranks and native oracle",
+    "scope": "Historical inactive first-step diagnostic; verify mode only, both SP ranks and native oracle",
     "evidence": "Stored runtime attributes only; no weight values, materialization, full-tensor hashing or extra CastBiasWeightContext",
     "execution_weight_verified": false,
-    "gpu_tested": true
+    "gpu_tested": true,
+    "active": false
   },
   "full_layer_hash_diagnostic_patch": {
-    "scope": "verify first SP2 forward only",
+    "scope": "Historical inactive first-step diagnostic; verify first SP2 forward only",
     "projection_block": 34,
     "block_exits": [
       0,
@@ -307,19 +324,21 @@
     "format": "SHA256 over canonical dtype, logical window shape and global row bounds plus unchanged contiguous tensor bytes",
     "limitations": "Bitwise mismatch alone does not establish model-quality degradation; unchanged full-output numerical gate is separate",
     "gpu_tested": true,
-    "blocks": 50
+    "blocks": 50,
+    "active": false
   },
   "projection_hash_diagnostic_patch": {
-    "scope": "verify first SP2 forward only",
+    "scope": "Historical inactive first-step diagnostic; verify first SP2 forward only",
     "projection_block": 34,
     "points": 8,
     "rows": 16,
     "max_cpu_chunk_bytes": 16777216,
     "gpu_tested": true,
-    "limitations": "Bitwise hash equality compares complete rank windows; mismatch is not a numerical tolerance or a quality verdict. Full-output native parity gate is unchanged."
+    "limitations": "Bitwise hash equality compares complete rank windows; mismatch is not a numerical tolerance or a quality verdict. Full-output native parity gate is unchanged.",
+    "active": false
   },
   "projection_m_replay_diagnostic_patch": {
-    "scope": "verification first SP2 forward and its existing native oracle only",
+    "scope": "Historical inactive first-step diagnostic; verification first SP2 forward and its existing native oracle only",
     "block": 34,
     "point": "attn.out_proj",
     "windows": 2,
@@ -328,12 +347,13 @@
     "backend_verified": false,
     "gpu_tested": true,
     "native_oracle_changed": false,
-    "limitations": "Uses original bound Linear._forward with same actual cast weight/bias and native input scale; backend and dequantization fallback are not independently proven. M-related execution differences are not proof of a particular CUDA algorithm."
+    "limitations": "Uses original bound Linear._forward with same actual cast weight/bias and native input scale; backend and dequantization fallback are not independently proven. M-related execution differences are not proof of a particular CUDA algorithm.",
+    "active": false
   },
-  "diagnostic_probe_only": true,
+  "diagnostic_probe_only": false,
   "formal_eligible": false,
   "full_m_projection_probe": {
-    "scope": "verify first SP2 forward only; both ranks, all50 attn.out_proj",
+    "scope": "Historical first-forward causal probe retained in source for provenance; inactive in complete recipe.",
     "point": "attn.out_proj",
     "logical_full_rows": 45167,
     "padded_full_rows": 45168,
@@ -421,16 +441,17 @@
     "native_quant_comparison_blocks": [
       34
     ],
-    "returned_output_binding": "Independent actual out_proj module post-hook hash equals cloned crop SHA. Only block34 also binds existing native projection comparison; other out_proj crops are not compared to block residual-output hashes."
+    "returned_output_binding": "Independent actual out_proj module post-hook hash equals cloned crop SHA. Only block34 also binds existing native projection comparison; other out_proj crops are not compared to block residual-output hashes.",
+    "active": false
   },
   "diagnostic_resources": {
-    "vram_headroom_gib": 4.0,
-    "scope": "verify-only SP2 full-head diagnostic",
+    "sp_vram_headroom_gib": 4.0,
+    "scope": "same explicit resource setting for every SP2 runtime, verify and formal",
     "actual_free_memory_budget_required": true,
-    "formal_default_changed": false
+    "formal_default_changed": true
   },
   "full_head_diagnostic_probe": {
-    "scope": "verify first SP2 forward only; both ranks execute original native FinalLayer on gathered full h",
+    "scope": "Historical first-forward causal probe retained in source for provenance; inactive in complete recipe.",
     "world": 2,
     "rows": 2,
     "logical_rows": 45167,
@@ -448,7 +469,7 @@
     "native_oracle_changed": false,
     "original_numerical_threshold": 0.001,
     "formal_allowed": false,
-    "gpu_tested": false,
+    "gpu_tested": true,
     "input_binding": "Each rank gathered full-h window SHA must equal both native block49 window and corresponding SP rank block49 exit SHA.",
     "output": "Call original FinalLayer once per rank with original global segments and t_emb; clone the old rank intersections and use unchanged final FP32 output gathers.",
     "diagnostic_only_collectives": {
@@ -467,6 +488,48 @@
       "required": "max(1GiB, max(gather+send, gather+modulation+head_weights+full_outputs+local_crops)+reserve)",
       "actual_raw_free_check_required": true
     },
-    "limitations": "This changes full FinalLayer execution geometry, including norm/modulation and effective PDD output heads; a pass does not identify an individual CUDA/GEMM algorithm. Communication budget does not prove actual allocator peak."
+    "limitations": "This changes full FinalLayer execution geometry, including norm/modulation and effective PDD output heads; a pass does not identify an individual CUDA/GEMM algorithm. Communication budget does not prove actual allocator peak.",
+    "active": false
+  },
+  "formal_allowed_after_matching_complete_diagnostic": true,
+  "runtime_recipe": {
+    "id": "nvfp4-fullm-out-fullhead-v1",
+    "world": 2,
+    "dynamic_sequence_windows": true,
+    "out_proj_modules_per_forward": 50,
+    "activation_amax_syncs_per_rank_per_forward": 200,
+    "full_final_layer_calls_per_rank_per_forward": 1,
+    "math_applies_to_every_forward": true,
+    "formal_and_verify_same_math": true,
+    "input_dtype": "torch.bfloat16",
+    "head_output_dtype": "torch.float32",
+    "diagnostic_hashes_per_forward": 0,
+    "replay_calls_per_forward": 0,
+    "installation_ballots_per_forward": 1,
+    "full_head_ballots_per_forward": 2,
+    "sp_vram_headroom_gib": 4.0,
+    "native_oracle_changed": false,
+    "verification": {
+      "cases": 3,
+      "requests_per_case": 1,
+      "forwards_per_request": 8,
+      "streams": [
+        "video",
+        "audio"
+      ],
+      "numerical_rows_per_case": 16,
+      "threshold": 0.001,
+      "step_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "formal_precondition": "Operator runner revalidates exact completed diagnostic journal SHA, all three case reports and per-step runtime/parity logs, media bytes, owned normal stops/two-idle receipts, matching deployed commit/controller/client/node contract/weights/protocol/sealed plans. A code contract alone is not acceptance."
   }
 }

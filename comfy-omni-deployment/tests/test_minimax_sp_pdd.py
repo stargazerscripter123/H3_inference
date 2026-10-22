@@ -23,11 +23,28 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+# BEGIN complete-recipe provenance
+COMPLETE_REVERSE_EDITS = {'sp_forward.py': [(390, 391, 'FULL_M_DIAGNOSTIC_PROBE_ONLY = False\n', 'FULL_M_DIAGNOSTIC_PROBE_ONLY = True\n'), (1353, 1579, '# BEGIN reviewed complete SP2 recipe\nSP_COMPLETE_RECIPE = True\nSP_RECIPE_NAME = "nvfp4-fullm-out-fullhead-v1"\nRUNTIME_OPERATION_KEY = "_minimax_sp_runtime_operation_id"\n\n\ndef _runtime_ctx_valid(ctx):\n    if ctx.world != 2 or ctx.rank not in (0, 1) or type(ctx.seq_len) is not int or ctx.seq_len < 2:\n        return False\n    splits = [(ctx.seq_len + 1) // 2, ctx.seq_len // 2]\n    return (list(ctx.splits) == splits and ctx.local == splits[ctx.rank]\n            and ctx.start == sum(splits[:ctx.rank]) and ctx.stop == sum(splits[:ctx.rank + 1]))\n\n\ndef _runtime_vote(ctx, ready, phase, details=None):\n    flag = torch.tensor([int(ready)], dtype=torch.int32, device="cuda:0")\n    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)\n    if not bool(flag.item()):\n        logging.info("[minimax_sp][runtime_error] %s", json.dumps(\n            {"schema_version": 1, "rank": ctx.rank, "phase": phase,\n             "code": "local_rejected" if not ready else "peer_rejected", "details": details},\n            sort_keys=True, allow_nan=False))\n        raise RuntimeError("MiniMax SP complete-recipe stage rejected")\n\n\nclass DynamicFullMProjection:\n    """Same packed full-M math as the causal probe, without activation hashes or per-target ballots."""\n    def __init__(self, ctx, module):\n        self.ctx, self.module, self.calls = ctx, module, 0\n        self.installation_verified = False\n\n    def execute(self, original, qinput, weight, bias):\n        self.calls += 1\n        ctx = self.ctx\n        buffers = full_input = full_output = crop = None\n        try:\n            if (not self.installation_verified or not _runtime_ctx_valid(ctx) or self.calls != 1\n                    or not isinstance(qinput, comfy.quant_ops.QuantizedTensor)\n                    or qinput._layout_cls != "TensorCoreNVFP4Layout"\n                    or tuple(qinput._params.orig_shape) != (ctx.local, 7168)\n                    or qinput._params.orig_dtype != torch.bfloat16 or qinput._params.transposed\n                    or qinput._qdata.device.type != "cuda" or qinput._qdata.device.index != 0\n                    or self.module.in_features != 7168 or self.module.out_features != 5376):\n                raise RuntimeError("complete_projection_scope_invalid")\n            budget = nvfp4_full_m_budget(local_rows=ctx.local, full_rows=ctx.seq_len,\n                input_cols=7168, global_start=ctx.start, output_cols=5376)\n            free = int(torch.cuda.mem_get_info(qinput._qdata.device)[0])\n            required = max(REPLAY_MINIMUM_FREE_BYTES, budget["conservative_additional_bytes"])\n            if free < required:\n                logging.info("[minimax_sp][runtime_error] %s", json.dumps(\n                    {"schema_version": 1, "rank": ctx.rank, "phase": "projection",\n                     "code": "memory_insufficient", "details": {"free_bytes": free, "required_free_bytes": required}},\n                    sort_keys=True, allow_nan=False))\n                raise RuntimeError("complete_projection_memory_insufficient")\n            buffers = nvfp4_full_m_zero_pad_storage(qinput._qdata, qinput._params.block_scale,\n                qinput._params.scale, local_rows=ctx.local, full_rows=ctx.seq_len,\n                input_cols=7168, global_start=ctx.start, allocation_limit_bytes=budget["helper_extra_bound_bytes"])\n            params = dataclasses.replace(qinput._params, orig_shape=(ctx.seq_len, 7168),\n                                         block_scale=buffers["block_scale"])\n            if (params.scale is not qinput._params.scale or params.orig_dtype != qinput._params.orig_dtype\n                    or params.transposed != qinput._params.transposed):\n                raise RuntimeError("complete_projection_params_changed")\n            full_input = type(qinput)(buffers["qdata"], qinput._layout_cls, params)\n            full_output = original(full_input, weight, bias)\n            crop = nvfp4_full_m_crop_output(full_output, full_rows=ctx.seq_len,\n                global_start=ctx.start, global_stop=ctx.stop, output_cols=5376)\n            return crop\n        finally:\n            buffers = full_input = full_output = None\n\n\nclass CompleteOutProjScope:\n    """Fresh every forward. Restore owned wrappers on every exit; never fall back on failure.\n\n    A local in-loop failure has no out-of-order emergency ballot. Its peer exits\n    through existing communication errors/timeouts and owned group cleanup.\n    """\n    def __init__(self, dit, ctx):\n        self.dit, self.ctx = dit, ctx\n        self.saved, self.probes, self.errors = [], [], []\n        self.entered = False\n        self.installed = False\n\n    def __enter__(self):\n        if self.entered:\n            raise RuntimeError("complete_projection_scope_reentry")\n        self.entered = True\n        try:\n            if not _runtime_ctx_valid(self.ctx) or len(self.dit.blocks) != 50:\n                raise RuntimeError("complete_projection_scope_invalid")\n            for block in self.dit.blocks:\n                module = block.attn.out_proj\n                if (module.in_features != 7168 or module.out_features != 5376\n                        or getattr(module, "pre_quant_scale", None) is not None\n                        or getattr(module, "input_scale", None) is not None\n                        or getattr(module, "quant_format", None) != "nvfp4"\n                        or getattr(module, "layout_type", None) != "TensorCoreNVFP4Layout"\n                        or getattr(module, "_full_precision_mm", False)\n                        or getattr(module, "comfy_force_cast_weights", False)\n                        or getattr(module, "weight_function", ()) or getattr(module, "bias_function", ())):\n                    raise RuntimeError("complete_projection_module_invalid")\n                if any(saved[0] is module for saved in self.saved):\n                    raise RuntimeError("complete_projection_module_alias")\n                previous, original = vars(module).get("_forward", _ABSENT), module._forward\n                probe = DynamicFullMProjection(self.ctx, module)\n                def wrapped(qinput, weight, bias, target=probe, saved=original):\n                    return target.execute(saved, qinput, weight, bias)\n                self.saved.append((module, previous, wrapped))\n                self.probes.append(probe)\n                module._forward = wrapped\n            self.installed = True\n        except Exception:\n            self.errors.append("complete_projection_install_failed")\n        return self\n\n    def vote_ready(self):\n        try:\n            ready = (self.installed and not self.errors and len(self.saved) == len(self.probes) == 50\n                     and all(module._forward is wrapped for module, _old, wrapped in self.saved))\n        except Exception:\n            ready = False\n        _runtime_vote(self.ctx, ready, "installation")\n        for probe in self.probes:\n            probe.installation_verified = True\n\n    def __exit__(self, kind, value, traceback):\n        complete = self.installed and len(self.probes) == 50 and all(probe.calls == 1 for probe in self.probes)\n        for module, previous, wrapped in reversed(self.saved):\n            try:\n                if module._forward is not wrapped:\n                    raise RuntimeError("complete_projection_restore_failed")\n                if previous is _ABSENT:\n                    delattr(module, "_forward")\n                else:\n                    module._forward = previous\n            except Exception:\n                self.errors.append("complete_projection_restore_failed")\n        self.saved.clear()\n        self.installed = False\n        if kind is None and (not complete or self.errors):\n            raise RuntimeError("complete_projection_calls_or_restore_invalid")\n        return False\n\n\ndef complete_head_budget(video_seg, audio_seg, ctx):\n    rows = [seg[1] - seg[0] for seg in (video_seg, audio_seg)]\n    crops = [max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start)) for seg in (video_seg, audio_seg)]\n    gather = 2 * max(ctx.splits) * 5376 * 2\n    send = max(ctx.splits) * 5376 * 2\n    scratch = max(rows) * 5376 * 12\n    weights = (3072 + 1024) * 5376 * 4\n    outputs = sum(n * w * 4 for n, w in zip(rows, (96, 32)))\n    clones = sum(n * w * 4 for n, w in zip(crops, (96, 32)))\n    return max(1024**3, max(gather + send, gather + scratch + weights + outputs + clones) + 256 * 1024**2)\n\n\ndef full_head_execute(dit, h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts, ctx):\n    send = gathered = full_h = v_full = a_full = v_local = a_local = output = None\n    prepared = False\n    details = None\n    try:\n        if (not _runtime_ctx_valid(ctx) or not isinstance(h, torch.Tensor) or h.dtype != torch.bfloat16\n                or tuple(h.shape) != (ctx.local, 5376) or h.device.type != "cuda" or h.device.index != 0\n                or h.requires_grad or not h.is_contiguous() or sample_sigmas is None\n                or dit.final_layer.video_dim != 96):\n            raise RuntimeError("complete_head_scope_invalid")\n        for seg in (video_seg, audio_seg):\n            if (len(seg) != 3 or type(seg[0]) is not int or type(seg[1]) is not int\n                    or not 0 <= seg[0] < seg[1] <= ctx.seq_len):\n                raise RuntimeError("complete_head_segments_invalid")\n        if audio_seg[1] != video_seg[0] or video_seg[1] != ctx.seq_len:\n            raise RuntimeError("complete_head_segment_order_invalid")\n        required = complete_head_budget(video_seg, audio_seg, ctx)\n        free = int(torch.cuda.mem_get_info(h.device)[0])\n        details = {"free_bytes": free, "required_free_bytes": required}\n        if free < required:\n            raise RuntimeError("complete_head_memory_insufficient")\n        send = torch.zeros((max(ctx.splits), 5376), dtype=h.dtype, device=h.device)\n        send[:ctx.local].copy_(h)\n        gathered = torch.empty((2 * max(ctx.splits), 5376), dtype=h.dtype, device=h.device)\n        prepared = True\n    except Exception:\n        send = gathered = None\n    _runtime_vote(ctx, prepared, "full_head_preparation", details)\n    dist.all_gather_into_tensor(gathered, send, group=ctx.group)\n    send = None\n    complete = False\n    try:\n        # With exactly two balanced shards, the only optional padding is at the end.\n        full_h = gathered[:ctx.seq_len]\n        v_full, a_full = dit.final_layer(full_h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts)\n        for output, seg, width in ((v_full, video_seg, 96), (a_full, audio_seg, 32)):\n            if (not isinstance(output, torch.Tensor) or output.dtype != torch.float32\n                    or tuple(output.shape) != (seg[1] - seg[0], width)\n                    or output.device != h.device or output.requires_grad):\n                raise RuntimeError("complete_head_output_invalid")\n        del output\n        def crop(output, seg):\n            lo, hi = max(seg[0], ctx.start), min(seg[1], ctx.stop)\n            if hi <= lo:\n                return output[:0].clone(memory_format=torch.contiguous_format)\n            return output[lo - seg[0]:hi - seg[0]].clone(memory_format=torch.contiguous_format)\n        v_local, a_local = crop(v_full, video_seg), crop(a_full, audio_seg)\n        complete = True\n    except Exception:\n        v_local = a_local = None\n    finally:\n        send = gathered = full_h = v_full = a_full = output = None\n    _runtime_vote(ctx, complete, "full_head_execution", details)\n    return v_local, a_local\n\n\ndef complete_runtime_receipt(ctx, operation_id, scale_scope, out_scope):\n    counts = scale_scope.counts()\n    if (not _runtime_ctx_valid(ctx) or type(operation_id) is not int or operation_id < 1\n            or counts != {"target_forwards": 200, "activation_syncs": 200, "per_block": [4] * 50}\n            or len(out_scope.probes) != 50 or any(probe.calls != 1 for probe in out_scope.probes)\n            or out_scope.installed or out_scope.errors):\n        raise RuntimeError("complete_runtime_counts_invalid")\n    return {"schema_version": 1, "recipe": SP_RECIPE_NAME, "operation_id": operation_id,\n        "rank": ctx.rank, "world": 2, "seq_len": ctx.seq_len, "splits": list(ctx.splits),\n        "global_start": ctx.start, "global_stop": ctx.stop, "input_dtype": "torch.bfloat16",\n        "out_proj_calls": 50, "activation_syncs": 200, "final_layer_calls": 1,\n        "installation_ballots": 1, "full_head_ballots": 2, "diagnostic_hashes": 0, "replay_calls": 0}\n# END reviewed complete SP2 recipe\n\n', ''), (2087, 2088, '             if not SP_COMPLETE_RECIPE and ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True else None)\n', '             if ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True else None)\n'), (2092, 2097, '    runtime_scope = CompleteOutProjScope(dit, ctx) if SP_COMPLETE_RECIPE and ctx.world == 2 else None\n    with scale_context as scale_scope, (runtime_scope if runtime_scope is not None else (trace if trace is not None else nullcontext())):\n        if runtime_scope is not None:\n            runtime_scope.vote_ready()\n        elif trace is not None:\n', '    with scale_context as scale_scope, (trace if trace is not None else nullcontext()):\n        if trace is not None:\n'), (2102, 2103, '    if not SP_COMPLETE_RECIPE and ctx.world == 2 and os.environ.get("MINIMAX_SP_VERIFY") == "1":\n', '    if ctx.world == 2 and os.environ.get("MINIMAX_SP_VERIFY") == "1":\n'), (2129, 2133, '        if runtime_scope is not None:\n            v_local, a_local = full_head_execute(dit, h, t_emb, video_seg, audio_seg,\n                sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a), ctx)\n        elif trace is not None:\n', '        if trace is not None:\n'), (2141, 2144, '    if runtime_scope is not None:\n        receipt = complete_runtime_receipt(ctx, transformer_options.get(RUNTIME_OPERATION_KEY), scale_scope, runtime_scope)\n        logging.info("[minimax_sp][runtime_step] %s", json.dumps(receipt, sort_keys=True, allow_nan=False))\n', '')], 'sp_group.py': [(16, 17, 'import math\n', ''), (35, 36, 'TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars", spf.BLOCK0_TRACE_REQUEST, spf.RUNTIME_OPERATION_KEY)\n', 'TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars", spf.BLOCK0_TRACE_REQUEST)\n'), (40, 41, 'def native_parity_metrics(actual_outputs, expected_outputs, *, mirror=False, emit=True):\n', 'def native_parity_metrics(actual_outputs, expected_outputs, *, mirror=False):\n'), (50, 53, '        if emit:\n            logging.info("[minimax_sp][%s] %s max_abs=%.8g relative=%.8g finite=%d",\n                         tag, label, delta, relative, finite)\n', '        logging.info("[minimax_sp][%s] %s max_abs=%.8g relative=%.8g finite=%d",\n                     tag, label, delta, relative, finite)\n'), (208, 210, '        if getattr(spf, "SP_COMPLETE_RECIPE", False) and world != 2:\n            raise RuntimeError("MiniMax SP complete recipe supports exactly two ranks")\n', ''), (320, 397, '    def forward_complete_recipe(self, dit, x, timestep, context, transformer_options, payload,\n                                denoise_mask=None, audio_denoise_mask=None):\n        self.check_alive()\n        if not self.patches_ready or self.world != 2:\n            raise RuntimeError("MiniMax SP complete recipe requires two ready patched ranks")\n        spf.validate_transformer_options(transformer_options)\n        private_keys = (spf.BLOCK0_TRACE_REQUEST, spf.BLOCK0_TRACE_RESULT, spf.RUNTIME_OPERATION_KEY)\n        if any(key in transformer_options for key in private_keys):\n            raise RuntimeError("MiniMax SP reserved runtime option in caller state")\n        verify = self.verify_pending\n        if verify and not 0 <= self.n_forward < 8:\n            self.destroy()\n            raise RuntimeError("MiniMax SP complete verification accepts exactly eight forwards")\n        profile = bool(os.environ.get("MINIMAX_SP_PROFILE"))\n        sp_options = transformer_options.copy()\n        sp_options[spf.RUNTIME_OPERATION_KEY] = self.operation_id + 1\n        try:\n            t_disp = time.perf_counter()\n            meta = build_meta(x, timestep, context, sp_options, payload)\n            meta["operation_id"] = self.operation_id + 1\n            meta["denoise_mask"] = tensor_meta(denoise_mask)\n            meta["audio_denoise_mask"] = tensor_meta(audio_denoise_mask)\n            dist.broadcast_object_list([meta], src=0, group=self.control_pg)\n            expected = forward_status(meta)\n            replies = [None] * self.world\n            dist.all_gather_object(replies, expected, group=self.control_pg)\n            validate_forward_status(expected, replies)\n            self.operation_id = meta["operation_id"]\n            t_meta = time.perf_counter()\n            device = x[0].device\n            if transformer_options.get("sample_sigmas") is not None:\n                transformer_options["sample_sigmas"] = transformer_options["sample_sigmas"].to(device)\n                sp_options["sample_sigmas"] = transformer_options["sample_sigmas"]\n            for tensor in [*ordered_tensors(x, timestep, context, transformer_options, payload), denoise_mask, audio_denoise_mask]:\n                if tensor is not None:\n                    dist.broadcast(tensor.to(device).contiguous(), src=0, group=self.tensor_pg)\n            if profile:\n                torch.cuda.synchronize()\n            t0 = time.perf_counter()\n            out = spf.sp_forward(dit, x, timestep, context, sp_options, payload,\n                                 0, self.world, self.tensor_pg, denoise_mask, audio_denoise_mask)\n            if verify:\n                # No tensor hooks, full-layer hashing, replay, or modified native oracle.\n                reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),\n                    minimax_payload=payload, denoise_mask=denoise_mask, audio_denoise_mask=audio_denoise_mask)\n                checks = native_parity_metrics(out, reference, emit=False)\n                failed = False\n                for check in checks:\n                    finite = (check["finite"] and math.isfinite(check["max_abs"]) and math.isfinite(check["relative"]))\n                    passed = finite and check["relative"] <= 1e-3\n                    row = {"schema_version": 1, "operation_id": self.operation_id, "step": self.n_forward,\n                           "stream": check["label"], "finite": finite,\n                           "max_abs": check["max_abs"] if finite else None,\n                           "relative": check["relative"] if finite else None,\n                           "threshold": 0.001, "passed": passed}\n                    logging.info("[minimax_sp][verify_step] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                    failed = failed or not passed\n                reference = None\n                if failed:\n                    raise RuntimeError("MiniMax SP complete-recipe native parity failed")\n            if profile:\n                torch.cuda.synchronize()\n                logging.info(f"[minimax_sp][profile] step {self.n_forward}: "\n                             f"meta_bcast={1000 * (t_meta - t_disp):.1f}ms "\n                             f"tensor_bcast={1000 * (t0 - t_meta):.1f}ms "\n                             f"sp_forward={1000 * (time.perf_counter() - t0):.1f}ms")\n            # Always count successful forwards, independently of timing logging.\n            self.n_forward += 1\n            return out\n        except comfy.model_management.InterruptProcessingException:\n            self.destroy()\n            raise\n        except Exception:\n            logging.error("[minimax_sp] forward failed; rebuilding the group on the next prompt: complete_recipe_failed")\n            self.destroy()\n            raise\n\n', ''), (399, 402, '        if getattr(spf, "SP_COMPLETE_RECIPE", False):\n            return self.forward_complete_recipe(dit, x, timestep, context, transformer_options, payload,\n                                                denoise_mask, audio_denoise_mask)\n', '')]}
+COMPLETE_PRIOR_SHA = {'sp_forward.py': 'b76f910dfcc7dd65e92dc0b653d4a268bf66f0e931a785b0dd02a1540427d1c9', 'sp_group.py': 'c1a92bbcd5b88e78e362c9cb3c57b45c6e54ad306fcc333f626b6d769901694b'}
+
+def reverse_complete_recipe(source,name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(COMPLETE_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('complete recipe reviewed block digest/source changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=COMPLETE_PRIOR_SHA[name]:
+        raise AssertionError('complete recipe reviewed block digest differs from full-head source')
+    return source
+# END complete-recipe provenance
+
 # BEGIN full-head provenance
 FULL_HEAD_REVERSE_EDITS = {'sp_forward.py': [(932, 933, '        self.full_head = None\n', ''), (1020, 1022, '                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet(),\n                "full_head": self.full_head}\n', '                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet()}\n'), (1170, 1352, '\n# BEGIN reviewed full-sequence FinalLayer diagnostic\nFULL_HEAD_ERROR_CODES = ("full_head_scope_invalid", "full_head_memory_insufficient",\n                         "full_head_preparation_failed", "full_head_execution_failed", "full_head_peer_rejected")\n\n\ndef full_head_budget(video_seg, audio_seg, ctx):\n    """Conservative allocation model, not an allocator/backend peak guarantee."""\n    widths = (96, 32)\n    segments = (video_seg, audio_seg)\n    rows = [seg[1] - seg[0] for seg in segments]\n    crops = [max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start)) for seg in segments]\n    gather_bytes = 45168 * 5376 * 2\n    send_bytes = 22584 * 5376 * 2\n    modulation_workspace_bytes = max(rows) * 5376 * 12\n    head_weight_bytes = (3072 + 1024) * 5376 * 4\n    output_bytes = sum(n * w * 4 for n, w in zip(rows, widths))\n    crop_bytes = sum(n * w * 4 for n, w in zip(crops, widths))\n    reserve_bytes = 256 * 1024 * 1024\n    # The send buffer is released before the original FinalLayer executes.\n    gather_phase_bytes = gather_bytes + send_bytes\n    head_phase_bytes = (gather_bytes + modulation_workspace_bytes + head_weight_bytes\n                        + output_bytes + crop_bytes)\n    required = max(1024 * 1024 * 1024, max(gather_phase_bytes, head_phase_bytes) + reserve_bytes)\n    return {"gather_bytes": gather_bytes, "send_bytes": send_bytes,\n            "modulation_workspace_bytes": modulation_workspace_bytes, "head_weight_bytes": head_weight_bytes,\n            "output_bytes": output_bytes, "crop_bytes": crop_bytes, "reserve_bytes": reserve_bytes,\n            "gather_phase_bytes": gather_phase_bytes, "head_phase_bytes": head_phase_bytes,\n            "required_free_bytes": required}\n\n\ndef _full_head_vote(ctx, success, phase, code, memory, budget):\n    flag = torch.tensor([int(success)], dtype=torch.int32, device="cuda:0")\n    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)\n    if not bool(flag.item()):\n        if success:\n            code = "full_head_peer_rejected"\n        logging.info("[minimax_sp][full_head_error] %s", json.dumps(\n            {"schema_version": 1, "rank": ctx.rank, "phase": phase, "code": code,\n             "memory": memory, "budget": budget, "formal_eligible": False},\n            sort_keys=True, allow_nan=False))\n        raise RuntimeError("MiniMax SP full-head diagnostic rejected")\n\n\ndef full_head_probe(dit, h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts, ctx):\n    """One exact native FinalLayer call per rank, on original-dtype global h.\n\n    Local preparation errors vote before the data collective. Local hash/head/\n    crop errors vote after it and before the existing output gathers. Collective\n    transport failures still rely on the existing process-group timeout/cleanup.\n    Neither native nor world1 installs or calls this diagnostic helper.\n    """\n    send = gathered = full_h = v_full = a_full = v_local = a_local = None\n    memory = budget = None\n    code = "full_head_scope_invalid"\n    prepared = False\n    try:\n        if (ctx.world != 2 or ctx.rank not in (0, 1) or ctx.seq_len != 45167\n                or list(ctx.splits) != [22584, 22583]\n                or (ctx.start, ctx.stop, ctx.local) != ((0, 22584, 22584) if ctx.rank == 0 else (22584, 45167, 22583))\n                or not isinstance(h, torch.Tensor) or h.dtype != torch.bfloat16\n                or tuple(h.shape) != (ctx.local, 5376) or h.device.type != "cuda" or h.device.index != 0\n                or h.requires_grad or not h.is_contiguous()\n                or sample_sigmas is None):\n            raise RuntimeError("full_head_scope_invalid")\n        for seg in (video_seg, audio_seg):\n            if (len(seg) != 3 or type(seg[0]) is not int or type(seg[1]) is not int\n                    or not 0 <= seg[0] < seg[1] <= ctx.seq_len):\n                raise RuntimeError("full_head_scope_invalid")\n        if (audio_seg[1] != video_seg[0] or video_seg[1] != ctx.seq_len\n                or dit.final_layer.video_dim != 96):\n            raise RuntimeError("full_head_scope_invalid")\n        budget = full_head_budget(video_seg, audio_seg, ctx)\n        free, total = torch.cuda.mem_get_info(h.device)\n        memory = {"free_bytes": int(free), "total_bytes": int(total),\n                  "reserved_bytes": int(torch.cuda.memory_reserved(h.device)),\n                  "allocated_bytes": int(torch.cuda.memory_allocated(h.device))}\n        code = "full_head_memory_insufficient"\n        if free < budget["required_free_bytes"]:\n            raise RuntimeError("full_head_memory_insufficient")\n        code = "full_head_preparation_failed"\n        send = torch.zeros((22584, 5376), dtype=h.dtype, device=h.device)\n        send[:ctx.local].copy_(h)\n        gathered = torch.empty((45168, 5376), dtype=h.dtype, device=h.device)\n        prepared = True\n    except Exception:\n        send = gathered = None\n    _full_head_vote(ctx, prepared, "preparation", code, memory, budget)\n    # Equal-size gather pads only the final global row, never an internal gap.\n    dist.all_gather_into_tensor(gathered, send, group=ctx.group)\n    send = None\n    complete = False\n    record = None\n    try:\n        full_h = gathered[:45167]\n        windows = [streamed_tensor_sha256(full_h, tensor_global_start=0,\n                   global_start=start, global_stop=stop) for start, stop in ((0, 22584), (22584, 45167))]\n        # Pass the original objects, including scalar/per-token modulation rows.\n        v_full, a_full = dit.final_layer(full_h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts)\n        full_outputs = (v_full, a_full)\n        for output, seg, width in zip(full_outputs, (video_seg, audio_seg), (96, 32)):\n            if (not isinstance(output, torch.Tensor) or output.dtype != torch.float32\n                    or tuple(output.shape) != (seg[1] - seg[0], width)\n                    or output.device != h.device or output.requires_grad):\n                raise RuntimeError("full_head_execution_failed")\n        del output\n        def crop(output, seg):\n            lo, hi = max(seg[0], ctx.start), min(seg[1], ctx.stop)\n            if hi <= lo:\n                return output[:0].clone(memory_format=torch.contiguous_format)\n            return output[lo - seg[0]:hi - seg[0]].clone(memory_format=torch.contiguous_format)\n        v_local, a_local = crop(v_full, video_seg), crop(a_full, audio_seg)\n        record = {"schema_version": 1, "rank": ctx.rank, "world": 2,\n            "scope": "verify_first_forward_full_final_layer", "applied": True, "call_count": 1,\n            "input_dtype": str(h.dtype), "input_shape": [45167, 5376], "padded_shape": [45168, 5376],\n            "splits": list(ctx.splits), "source_window": [ctx.start, ctx.stop],\n            "global_segments": {"video": list(video_seg[:2]), "audio": list(audio_seg[:2])},\n            "segment_row_objects_reused": True, "t_emb_object_reused": True,\n            "full_h_windows": windows,\n            "full_output_shapes": {"video": list(v_full.shape), "audio": list(a_full.shape)},\n            "local_output_shapes": {"video": list(v_local.shape), "audio": list(a_local.shape)},\n            "output_dtype": str(v_full.dtype), "memory": memory, "budget": budget,\n            "preparation_ballot_count": 1, "execution_ballot_count": 1, "total_ballot_count": 2,\n            "tensor_gather_count": 1, "formal_eligible": False, "native_oracle_changed": False}\n        complete = True\n    except Exception:\n        v_local = a_local = None\n    finally:\n        # The returned clones do not retain full-h/full-output storage.\n        send = gathered = full_h = v_full = a_full = None\n        full_outputs = None\n    _full_head_vote(ctx, complete, "execution", "full_head_execution_failed", memory, budget)\n    return v_local, a_local, record\n\n\ndef full_head_summary(packets, native):\n    if native.get("full_head") is not None or not isinstance(packets, list) or len(packets) != 2:\n        raise RuntimeError("full_head_packet_invalid")\n    records = []\n    for rank, packet in enumerate(packets):\n        row = packet.get("full_head")\n        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("world") != 2\n                or row.get("schema_version") != 1 or row.get("scope") != "verify_first_forward_full_final_layer"\n                or row.get("applied") is not True or row.get("call_count") != 1\n                or row.get("input_dtype") != "torch.bfloat16" or row.get("input_shape") != [45167, 5376]\n                or row.get("padded_shape") != [45168, 5376] or row.get("splits") != [22584, 22583]\n                or row.get("source_window") != [packet["start"], packet["stop"]]\n                or row.get("segment_row_objects_reused") is not True or row.get("t_emb_object_reused") is not True\n                or row.get("output_dtype") != "torch.float32" or row.get("formal_eligible") is not False\n                or row.get("native_oracle_changed") is not False\n                or [row.get(k) for k in ("preparation_ballot_count", "execution_ballot_count", "total_ballot_count", "tensor_gather_count")] != [1, 1, 2, 1]):\n            raise RuntimeError("full_head_packet_invalid")\n        windows = row.get("full_h_windows")\n        if (not isinstance(windows, list) or len(windows) != 2\n                or windows != native["full_hashes"]["block49.post"]\n                or any(windows[r] != packets[r]["full_hashes"]["block49.post"][0] for r in range(2))):\n            raise RuntimeError("full_head_input_hash_mismatch")\n        # Recompute sizes/guard from the recorded global target segments.\n        ctx = types.SimpleNamespace(start=packet["start"], stop=packet["stop"])\n        segments = row.get("global_segments", {})\n        video, audio = segments.get("video", []), segments.get("audio", [])\n        if (set(segments) != {"video", "audio"} or any(len(seg) != 2 or any(type(n) is not int for n in seg)\n                or not 0 <= seg[0] < seg[1] <= 45167 for seg in (video, audio))\n                or audio[1] != video[0] or video[1] != 45167):\n            raise RuntimeError("full_head_segment_invalid")\n        if row.get("budget") != full_head_budget(video, audio, ctx):\n            raise RuntimeError("full_head_budget_invalid")\n        memory = row.get("memory")\n        if (not isinstance(memory, dict) or set(memory) != {"free_bytes", "total_bytes", "reserved_bytes", "allocated_bytes"}\n                or any(type(value) is not int or value < 0 for value in memory.values())\n                or not row["budget"]["required_free_bytes"] <= memory["free_bytes"] <= memory["total_bytes"]):\n            raise RuntimeError("full_head_memory_invalid")\n        for name, seg, width in (("video", video, 96), ("audio", audio, 32)):\n            local_rows = max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start))\n            if (row.get("full_output_shapes", {}).get(name) != [seg[1] - seg[0], width]\n                    or row.get("local_output_shapes", {}).get(name) != [local_rows, width]):\n                raise RuntimeError("full_head_output_shape_invalid")\n        records.append(row)\n    if records[0]["global_segments"] != records[1]["global_segments"]:\n        raise RuntimeError("full_head_segment_invalid")\n    return records\n# END reviewed full-sequence FinalLayer diagnostic\n', ''), (1900, 1906, '        if trace is not None:\n            v_local, a_local, trace.full_head = full_head_probe(dit, h, t_emb, video_seg, audio_seg,\n                sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a), ctx)\n        else:\n            v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),\n                                              sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))\n', '        v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),\n                                          sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))\n')], 'sp_group.py': [(401, 404, '                        full_heads = spf.full_head_summary(packets, native_trace.packet())\n                        for row in full_heads:\n                            logging.info("[minimax_sp][full_head] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
 FULL_HEAD_PRIOR_SHA = {'sp_forward.py': '985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb', 'sp_group.py': '5d081e141d9892d172d0065f6f6fa1acd33259ae8752c165185fe16f1332b801'}
 
 def reverse_full_head(source, name='sp_forward.py'):
+    source=reverse_complete_recipe(source,name)
     lines=source.splitlines(keepends=True)
     for lo,hi,after,before in reversed(FULL_HEAD_REVERSE_EDITS[name]):
         if ''.join(lines[lo:hi])!=after:
@@ -801,8 +818,8 @@ class GlobalAmaxIntegrationTests(unittest.TestCase):
             with self.subTest(change=old), self.assertRaisesRegex(AssertionError,'reviewed block digest'):
                 reverse_amax_scope(source.replace(old,new,1))
 
-    def test_actual_block_loop_scopes_world2_only_and_restores_before_count_log(self):
-        function = next(n for n in ast.parse(AFTER.read_text()).body
+    def test_historical_block_loop_scope_preserved_by_exact_reverse_patch(self):
+        function = next(n for n in ast.parse(reverse_complete_recipe(AFTER.read_text())).body
                         if isinstance(n,ast.FunctionDef) and n.name=='sp_forward')
         index = next(i for i,n in enumerate(function.body) if isinstance(n,ast.Assign)
                      and isinstance(n.targets[0],ast.Name) and n.targets[0].id=='scale_context')
@@ -2459,8 +2476,8 @@ class AllOutFullMScopeTests(_ao_unittest.TestCase):
 
 
 class FullHeadIntegrationTests(unittest.TestCase):
-    def test_only_trace_world2_branch_enters_full_head_and_original_output_gathers_remain(self):
-        source = ast.parse(AFTER.read_text())
+    def test_historical_probe_route_is_preserved_by_exact_reverse_patch(self):
+        source = ast.parse(reverse_complete_recipe(AFTER.read_text()))
         forward = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == 'sp_forward')
         calls = [n for n in ast.walk(forward) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                  and n.func.id == 'full_head_probe']
@@ -2729,6 +2746,443 @@ class FullHeadProbeTests(_fh_unittest.TestCase):
             with self.subTest(mutation=mutation),self.assertRaises(RuntimeError): summary(altered,reference)
 
 
+
+
+"""Portable CPU fixtures for the actual complete-recipe AST.
+
+Row-ID tensors check dynamic geometry/lifetimes only; they do not emulate CUDA,
+NVFP4 arithmetic or distributed peers. Existing packed-layout fixtures remain
+responsible for raw storage byte mapping.
+"""
+import ast as _cr_ast
+import dataclasses as _cr_dc
+import json as _cr_json
+from pathlib import Path as _CRPath
+from types import SimpleNamespace as _CRNS
+import unittest as _cr_ut
+import weakref as _cr_weakref
+
+
+def _cr_source():
+    p = _CRPath(__file__).resolve()
+    standalone = p.parent / 'complete_recipe_core.py'
+    return standalone if standalone.is_file() else p.parents[1] / 'custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py'
+
+
+def _cr_load(namespace):
+    wanted = {'_runtime_ctx_valid', '_runtime_vote', 'DynamicFullMProjection',
+              'CompleteOutProjScope', 'complete_head_budget', 'full_head_execute',
+              'complete_runtime_receipt'}
+    source = _cr_source()
+    nodes = [n for n in _cr_ast.parse(source.read_text()).body
+             if isinstance(n, (_cr_ast.FunctionDef, _cr_ast.ClassDef)) and n.name in wanted]
+    assert {n.name for n in nodes} == wanted
+    namespace.update(_ABSENT=object(), SP_RECIPE_NAME='nvfp4-fullm-out-fullhead-v1',
+                     REPLAY_MINIMUM_FREE_BYTES=1024**3, dataclasses=_cr_dc, json=_cr_json)
+    exec(compile(_cr_ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
+    return namespace
+
+
+def _cr_ctx(seq=17, rank=0):
+    splits = [(seq+1)//2, seq//2]
+    return _CRNS(world=2, rank=rank, seq_len=seq, splits=splits, local=splits[rank],
+                 start=sum(splits[:rank]), stop=sum(splits[:rank+1]), group=object())
+
+
+class _CRStorage:
+    def __init__(self, rows): self.rows = list(rows)
+
+
+class _CRTensor:
+    def __init__(self, shape, dtype, *, values=None, storage=None, offset=0, device=None):
+        self.shape, self.dtype, self.offset = tuple(shape), dtype, offset
+        self.storage = storage if storage is not None else _CRStorage(values if values is not None else [0]*shape[0])
+        self.device = device or _CRNS(type='cuda', index=0)
+        self.requires_grad = False
+    @property
+    def rows(self): return self.storage.rows[self.offset:self.offset+self.shape[0]]
+    def is_contiguous(self): return True
+    def __getitem__(self, item):
+        assert isinstance(item, slice) and item.step is None
+        lo, hi, _ = item.indices(self.shape[0])
+        return type(self)((hi-lo,self.shape[1]),self.dtype,storage=self.storage,offset=self.offset+lo,device=self.device)
+    def copy_(self, value):
+        assert self.shape == value.shape and self.dtype == value.dtype
+        self.storage.rows[self.offset:self.offset+self.shape[0]]=value.rows
+        return self
+    def clone(self, *, memory_format):
+        assert memory_format == 'contiguous'
+        return type(self)(self.shape,self.dtype,values=self.rows,device=self.device)
+
+
+class _CRHeadHarness:
+    def __init__(self, *, seq=17, rank=0, video_start=6, audio_start=3,
+                 free=8*1024**3, alloc_failure=None, peer_votes=(True,True), head_failure=False,
+                 bad_output=False):
+        self.ctx=_cr_ctx(seq,rank); ctx=self.ctx
+        self.h=_CRTensor((ctx.local,5376),'bf16',values=range(ctx.start,ctx.stop))
+        self.video_seg=(video_start,seq,object()); self.audio_seg=(audio_start,video_start,object())
+        self.t_emb,self.sigma,self.sigmas,self.shifts=object(),object(),object(),(12.0,3.0)
+        self.allocations=[];self.votes=[];self.gathers=0;self.heads=0;self.logs=[]
+        self.buffer_refs=[];self.output_refs=[];self.full_h_ref=None
+        owner=self
+        def allocate(shape, *, dtype,device):
+            self.allocations.append((tuple(shape),dtype))
+            if len(self.allocations)==alloc_failure: raise MemoryError('fixture')
+            out=_CRTensor(shape,dtype,device=device)
+            self.buffer_refs.append(_cr_weakref.ref(out.storage));return out
+        class Head:
+            video_dim=96
+            def __call__(self, full_h,t_emb,video_seg,audio_seg,sigma,sigmas,shifts):
+                owner.heads+=1
+                assert full_h.shape==(seq,5376) and full_h.dtype=='bf16'
+                assert full_h.rows==list(range(seq))
+                assert t_emb is owner.t_emb and video_seg is owner.video_seg and audio_seg is owner.audio_seg
+                assert sigma is owner.sigma and sigmas is owner.sigmas and shifts is owner.shifts
+                assert owner.buffer_refs[0]() is None
+                owner.full_h_ref=_cr_weakref.ref(full_h)
+                if head_failure: raise RuntimeError('fixture_private_head_failure')
+                result=[]
+                for seg,width in ((video_seg,96),(audio_seg,32)):
+                    out=_CRTensor((seg[1]-seg[0],width),'bf16' if bad_output else 'fp32',
+                                  values=range(seg[0],seg[1]),device=full_h.device)
+                    owner.output_refs.append(_cr_weakref.ref(out.storage));result.append(out)
+                return tuple(result)
+        def flag(values, *,dtype,device):
+            assert dtype=='int32' and device=='cuda:0'
+            out=_CRNS(value=values[0]);out.item=lambda:out.value;return out
+        def reduce(flag, *,op,group):
+            assert op=='MIN' and group is ctx.group
+            i=len(self.votes);self.votes.append(flag.value)
+            # On execution vote all large allocations must already be released.
+            if i==1: assert all(ref() is None for ref in self.buffer_refs+self.output_refs)
+            flag.value=int(bool(flag.value) and peer_votes[i])
+        def gather(output,local, *,group):
+            assert group is ctx.group and output.dtype==local.dtype=='bf16'
+            assert local.shape==(max(ctx.splits),5376)
+            expected=list(range(ctx.start,ctx.stop))+[0]*(max(ctx.splits)-ctx.local)
+            assert local.rows==expected
+            self.gathers+=1;output.storage.rows[:]=list(range(seq))+[0]*(2*max(ctx.splits)-seq)
+        torch=_CRNS(Tensor=_CRTensor,bfloat16='bf16',float32='fp32',int32='int32',
+            contiguous_format='contiguous',zeros=allocate,empty=allocate,tensor=flag,
+            cuda=_CRNS(mem_get_info=lambda device:(free,32*1024**3)))
+        self.ns=_cr_load({'torch':torch,'dist':_CRNS(all_reduce=reduce,all_gather_into_tensor=gather,
+            ReduceOp=_CRNS(MIN='MIN')),'logging':_CRNS(info=lambda *args:self.logs.append(args))})
+        self.dit=_CRNS(final_layer=Head())
+    def run(self):
+        return self.ns['full_head_execute'](self.dit,self.h,self.t_emb,self.video_seg,self.audio_seg,
+                                            self.sigma,self.sigmas,self.shifts,self.ctx)
+
+
+class _CRModule:
+    in_features=7168;out_features=5376;quant_format='nvfp4';layout_type='TensorCoreNVFP4Layout'
+    def __init__(self,index): self.index=index;self.calls=[]
+    def _forward(self,q,w,b): self.calls.append((q,w,b));return self.index,q,w,b
+
+
+class _CRScopeHarness:
+    def __init__(self, *, bad_index=None, peer_ready=True, failed_target=None):
+        self.ctx=_cr_ctx();self.modules=[_CRModule(i) for i in range(50)];self.votes=[]
+        self.originals={}
+        for i in (1,34,49):
+            original=self.modules[i]._forward
+            self.modules[i]._forward=lambda q,w,b,saved=original:saved(q,w,b)
+            self.originals[i]=self.modules[i]._forward
+        if bad_index is not None:self.modules[bad_index].quant_format='other'
+        self.dit=_CRNS(blocks=[_CRNS(attn=_CRNS(out_proj=m)) for m in self.modules])
+        owner=self
+        class Probe:
+            def __init__(self,ctx,module): self.ctx=ctx;self.module=module;self.calls=0;self.installation_verified=False
+            def execute(self,original,q,w,b):
+                assert self.installation_verified
+                self.calls+=1
+                if self.module.index==failed_target:raise RuntimeError('target_failed_no_fallback')
+                return original(q,w,b)
+        def vote(ctx,ready,phase,details=None):
+            assert ctx is self.ctx and phase=='installation';self.votes.append(bool(ready))
+            if not ready or not peer_ready:raise RuntimeError('installation_rejected')
+        self.ns=_cr_load({});self.ns.update(DynamicFullMProjection=Probe,_runtime_vote=vote)
+        self.scope=self.ns['CompleteOutProjScope'](self.dit,self.ctx)
+    def assert_restored(self,test):
+        for index,m in enumerate(self.modules):
+            if index in self.originals:test.assertIs(m._forward,self.originals[index])
+            else:test.assertNotIn('_forward',vars(m))
+
+
+class CompleteRecipePortableTests(_cr_ut.TestCase):
+    def test_dynamic_head_odd_even_rows_segments_dtypes_empty_crop_and_release(self):
+        for seq in (17,18,45167):
+            for rank in (0,1):
+                with self.subTest(seq=seq,rank=rank):
+                    h=_CRHeadHarness(seq=seq,rank=rank);v,a=h.run()
+                    self.assertEqual((h.gathers,h.heads,h.votes),(1,1,[1,1]))
+                    for output,seg,width in ((v,h.video_seg,96),(a,h.audio_seg,32)):
+                        lo,hi=max(seg[0],h.ctx.start),min(seg[1],h.ctx.stop)
+                        self.assertEqual(output.rows,list(range(lo,hi)) if hi>lo else [])
+                        self.assertEqual((output.shape[1],output.dtype),(width,'fp32'))
+                    self.assertTrue(all(ref() is None for ref in h.buffer_refs+h.output_refs))
+                    self.assertIsNone(h.full_h_ref())
+                    self.assertEqual(h.logs,[])
+
+    def test_dynamic_head_failure_votes_and_no_large_buffer_survival(self):
+        for options in ({'free':1},{'alloc_failure':1},{'alloc_failure':2},{'peer_votes':(False,True)}):
+            with self.subTest(options=options):
+                h=_CRHeadHarness(**options)
+                with self.assertRaisesRegex(RuntimeError,'stage rejected'):h.run()
+                self.assertEqual((h.gathers,h.heads),(0,0));self.assertEqual(len(h.votes),1)
+                self.assertTrue(all(ref() is None for ref in h.buffer_refs))
+        for options in ({'head_failure':True},{'bad_output':True},{'peer_votes':(True,False)}):
+            with self.subTest(options=options):
+                h=_CRHeadHarness(**options)
+                with self.assertRaisesRegex(RuntimeError,'stage rejected'):h.run()
+                self.assertEqual((h.gathers,h.heads,len(h.votes)),(1,1,2))
+                self.assertTrue(all(ref() is None for ref in h.buffer_refs+h.output_refs))
+
+    def test_dynamic_head_context_and_segment_failures_precede_tensor_gather(self):
+        for mutation in (lambda h:setattr(h.ctx,'world',1),lambda h:setattr(h.ctx,'splits',[8,9]),
+                         lambda h:setattr(h.h,'dtype','fp32'),lambda h:setattr(h.h.device,'index',1),
+                         lambda h:setattr(h,'sigmas',None),lambda h:setattr(h,'audio_seg',(3,7,object()))):
+            h=_CRHeadHarness();mutation(h)
+            with self.assertRaisesRegex(RuntimeError,'stage rejected'):h.run()
+            self.assertEqual((h.gathers,h.heads,h.votes),(0,0,[0]))
+
+    def test_all_50_closures_fresh_each_forward_and_original_instance_restore(self):
+        h=_CRScopeHarness();q,w,b=object(),object(),object()
+        for step in range(8):
+            scope=h.ns['CompleteOutProjScope'](h.dit,h.ctx)
+            with scope:
+                scope.vote_ready()
+                for i,m in enumerate(h.modules):self.assertEqual(m._forward(q,w,b),(i,q,w,b))
+            h.assert_restored(self)
+            self.assertEqual([probe.calls for probe in scope.probes],[1]*50)
+            self.assertFalse(scope.installed)
+            self.assertEqual(scope.errors,[])
+        self.assertEqual(h.votes,[True]*8)
+        self.assertTrue(all(len(m.calls)==8 for m in h.modules))
+
+    def test_partial_install_peer_failure_and_target_error_restore_without_fallback(self):
+        for options in ({'bad_index':17},{'peer_ready':False},{'failed_target':11}):
+            with self.subTest(options=options):
+                h=_CRScopeHarness(**options)
+                with self.assertRaises(RuntimeError):
+                    with h.scope:
+                        h.scope.vote_ready()
+                        for m in h.modules:m._forward(None,None,None)
+                h.assert_restored(self)
+                self.assertEqual(len(h.votes),1)
+                if 'failed_target' in options:
+                    self.assertEqual([len(m.calls) for m in h.modules],[1]*11+[0]*39)
+                else:self.assertTrue(all(not m.calls for m in h.modules))
+
+    def test_missing_or_duplicate_target_calls_and_reentry_fail_closed(self):
+        for indices in (range(49),list(range(50))+[34]):
+            h=_CRScopeHarness()
+            with self.assertRaisesRegex(RuntimeError,'calls_or_restore'):
+                with h.scope:
+                    h.scope.vote_ready()
+                    for i in indices:h.modules[i]._forward(None,None,None)
+            h.assert_restored(self)
+        h=_CRScopeHarness()
+        with h.scope:
+            h.scope.vote_ready()
+            with self.assertRaisesRegex(RuntimeError,'reentry'):h.scope.__enter__()
+            for m in h.modules:m._forward(None,None,None)
+        h.assert_restored(self)
+
+    def test_projection_constructs_same_scale_packed_input_and_releases_full_output(self):
+        @_cr_dc.dataclass
+        class Params:
+            orig_shape: tuple
+            orig_dtype: str
+            transposed: bool
+            scale: object
+            block_scale: object
+        class Packed:
+            def __init__(self): self.device=_CRNS(type='cuda',index=0)
+        class QT:
+            constructions=0
+            def __init__(self,qdata,layout,params):
+                type(self).constructions+=1
+                self._qdata,self._layout_cls,self._params=qdata,layout,params
+            @classmethod
+            def from_float(cls,*args,**kwargs): raise AssertionError('must not quantize again')
+        for seq,rank,free,fail in ((17,0,2**40,False),(18,1,2**40,False),
+                                   (17,0,1,False),(17,1,2**40,True)):
+            with self.subTest(seq=seq,rank=rank,free=free,fail=fail):
+                ctx=_cr_ctx(seq,rank);scale=object();weight,bias=object(),object()
+                q=QT(Packed(),'TensorCoreNVFP4Layout',Params((ctx.local,7168),'bf16',False,scale,object()))
+                QT.constructions=0;calls=[];refs=[];helper_calls=[]
+                def budget(**kwargs):
+                    self.assertEqual(kwargs,dict(local_rows=ctx.local,full_rows=seq,
+                        input_cols=7168,global_start=ctx.start,output_cols=5376))
+                    return {'conservative_additional_bytes':2**30,'helper_extra_bound_bytes':12345}
+                def helper(qdata,block_scale,actual_scale,**kwargs):
+                    helper_calls.append(1)
+                    self.assertIs(qdata,q._qdata);self.assertIs(block_scale,q._params.block_scale)
+                    self.assertIs(actual_scale,scale)
+                    self.assertEqual(kwargs,dict(local_rows=ctx.local,full_rows=seq,input_cols=7168,
+                                                global_start=ctx.start,allocation_limit_bytes=12345))
+                    data,scales=Packed(),Packed();refs.extend((_cr_weakref.ref(data),_cr_weakref.ref(scales)))
+                    return {'qdata':data,'block_scale':scales}
+                def original(full,w,b):
+                    calls.append(1);self.assertIs(w,weight);self.assertIs(b,bias)
+                    self.assertIs(full._params.scale,scale);self.assertIsNot(full._params,q._params)
+                    self.assertEqual(full._params.orig_shape,(seq,7168))
+                    self.assertEqual((full._params.orig_dtype,full._params.transposed),('bf16',False))
+                    if fail:raise RuntimeError('original_gemm_failed')
+                    out=_CRTensor((seq,5376),'bf16',values=range(seq))
+                    refs.append(_cr_weakref.ref(out.storage));return out
+                def crop(full,**kwargs):
+                    self.assertEqual(kwargs,dict(full_rows=seq,global_start=ctx.start,
+                                                global_stop=ctx.stop,output_cols=5376))
+                    return full[ctx.start:ctx.stop].clone(memory_format='contiguous')
+                ns=_cr_load({'torch':_CRNS(bfloat16='bf16',cuda=_CRNS(mem_get_info=lambda d:(free,2**40))),
+                    'comfy':_CRNS(quant_ops=_CRNS(QuantizedTensor=QT)),
+                    'nvfp4_full_m_budget':budget,'nvfp4_full_m_zero_pad_storage':helper,
+                    'nvfp4_full_m_crop_output':crop,'logging':_CRNS(info=lambda *args:None)})
+                probe=ns['DynamicFullMProjection'](ctx,_CRModule(0));probe.installation_verified=True
+                if free<2**30 or fail:
+                    with self.assertRaisesRegex(RuntimeError,'memory_insufficient|original_gemm_failed'):
+                        probe.execute(original,q,weight,bias)
+                else:
+                    result=probe.execute(original,q,weight,bias)
+                    self.assertEqual(result.rows,list(range(ctx.start,ctx.stop)))
+                    self.assertEqual(result.shape,(ctx.local,5376))
+                expected=0 if free<2**30 else 1
+                self.assertEqual((len(calls),len(helper_calls),QT.constructions),(expected,expected,expected))
+                self.assertTrue(all(ref() is None for ref in refs))
+                self.assertEqual(q._params.orig_shape,(ctx.local,7168))
+                with self.assertRaisesRegex(RuntimeError,'scope_invalid'):
+                    probe.execute(original,q,weight,bias)
+                self.assertEqual(len(calls),expected)
+
+    def test_runtime_receipt_exact_counts_and_no_tensor_payload(self):
+        h=_CRScopeHarness()
+        with h.scope:
+            h.scope.vote_ready()
+            for m in h.modules:m._forward(None,None,None)
+        counts={'target_forwards':200,'activation_syncs':200,'per_block':[4]*50}
+        scales=_CRNS(counts=lambda:counts)
+        receipt=h.ns['complete_runtime_receipt'](h.ctx,8,scales,h.scope)
+        self.assertEqual(receipt['operation_id'],8)
+        self.assertEqual((receipt['out_proj_calls'],receipt['activation_syncs'],receipt['final_layer_calls']),(50,200,1))
+        self.assertEqual((receipt['installation_ballots'],receipt['full_head_ballots'],receipt['diagnostic_hashes'],receipt['replay_calls']),(1,2,0,0))
+        _cr_json.dumps(receipt,allow_nan=False)
+        for bad in ({**counts,'activation_syncs':199},{**counts,'per_block':[4]*49}):
+            with self.assertRaisesRegex(RuntimeError,'counts_invalid'):
+                h.ns['complete_runtime_receipt'](h.ctx,8,_CRNS(counts=lambda:bad),h.scope)
+        h.scope.installed=True
+        with self.assertRaisesRegex(RuntimeError,'counts_invalid'):
+            h.ns['complete_runtime_receipt'](h.ctx,8,scales,h.scope)
+
+
+if __name__=='__main__':_cr_ut.main()
+
+
+# Actual complete-recipe group method, with CPU scalar arrays and fake transport.
+def complete_group_fixture(**kwargs):
+    fixture = parity_fixture(**kwargs)
+    fixture.namespace['math'] = __import__('math')
+    fixture.namespace['spf'].RUNTIME_OPERATION_KEY = '_minimax_sp_runtime_operation_id'
+    tree = ast.parse(GROUP_SOURCE.read_text())
+    owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'SPGroup')
+    method = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == 'forward_complete_recipe')
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(GROUP_SOURCE), 'exec'), fixture.namespace)
+    fixture.complete = fixture.namespace['forward_complete_recipe']
+    return fixture
+
+
+def complete_group_rows(fixture):
+    marker='[minimax_sp][verify_step] '
+    return [json.loads(item[1].split(marker,1)[1]) for item in fixture.events
+            if isinstance(item,tuple) and item[0]=='log' and marker in item[1]]
+
+
+class CompleteGroupVerificationTests(unittest.TestCase):
+    def test_all_eight_steps_both_streams_and_ninth_refused_before_generation(self):
+        f=complete_group_fixture(world2_good=True,profile=True)
+        for _ in range(8): self.assertIs(f.complete(*f.args),f.native)
+        rows=complete_group_rows(f)
+        self.assertEqual([(r['step'],r['stream'],r['operation_id']) for r in rows],
+            [(step,stream,step+1) for step in range(8) for stream in ('video','audio')])
+        self.assertTrue(all(r['finite'] and r['passed'] and r['threshold']==0.001 for r in rows))
+        self.assertEqual(f.owner.n_forward,8);self.assertEqual(f.owner.operation_id,8)
+        self.assertEqual(f.events.count('native'),8);self.assertEqual(f.events.count(('sp',2)),8)
+        self.assertTrue(f.owner.verify_pending)
+        profiles=[e[1] for e in f.events if isinstance(e,tuple) and e[0]=='log' and '[profile]' in e[1]]
+        self.assertEqual([line.split('step ',1)[1].split(':',1)[0] for line in profiles],list(map(str,range(8))))
+        with self.assertRaisesRegex(RuntimeError,'exactly eight'): f.complete(*f.args)
+        self.assertEqual(f.events.count(('sp',2)),8);f.owner.destroy.assert_called_once()
+        self.assertEqual(f.args[5],{})
+
+    def test_formal_counts_thirty_two_without_native_profile_or_trace(self):
+        f=complete_group_fixture(verify=False,world2_good=True)
+        original=f.namespace['spf'].sp_forward
+        calls=[]
+        def dispatch(*args):
+            calls.append(dict(args[4]));return original(*args)
+        f.namespace['spf'].sp_forward=dispatch
+        for _ in range(32):f.complete(*f.args)
+        self.assertEqual(f.owner.n_forward,32);self.assertEqual(f.owner.operation_id,32)
+        self.assertEqual([row['_minimax_sp_runtime_operation_id'] for row in calls],list(range(1,33)))
+        self.assertTrue(all(set(row)=={'_minimax_sp_runtime_operation_id'} for row in calls))
+        self.assertNotIn('native',f.events);self.assertFalse(complete_group_rows(f))
+        self.assertFalse(any(isinstance(e,tuple) and e[0]=='log' and '[profile]' in e[1] for e in f.events))
+        f.namespace['spf'].projection_replay_summary.assert_not_called()
+        f.namespace['spf'].layer_hash_summary.assert_not_called()
+        f.owner.destroy.assert_not_called();self.assertEqual(f.args[5],{})
+
+    def test_later_step_failure_records_both_streams_without_future_success(self):
+        f=complete_group_fixture(world2_good=True,profile=True)
+        for _ in range(3):f.complete(*f.args)
+        f.namespace['spf'].sp_forward=lambda *args:[ParityArray([8.,-2.]),ParityArray([9.,-4.])]
+        with self.assertRaisesRegex(RuntimeError,'native parity failed'):f.complete(*f.args)
+        rows=complete_group_rows(f)
+        self.assertEqual(len(rows),8);self.assertEqual([r['step'] for r in rows[-2:]],[3,3])
+        self.assertTrue(all(not r['passed'] for r in rows[-2:]))
+        self.assertEqual(f.owner.n_forward,3);self.assertEqual(f.owner.operation_id,4)
+        f.owner.destroy.assert_called_once()
+
+    def test_nonfinite_is_json_null_both_streams_and_fails_closed(self):
+        f=complete_group_fixture(world2_good=True)
+        f.namespace['spf'].sp_forward=lambda *args:[ParityArray([np.nan,-2.]),ParityArray([np.inf,-4.])]
+        with self.assertRaisesRegex(RuntimeError,'native parity failed'):f.complete(*f.args)
+        rows=complete_group_rows(f);self.assertEqual(len(rows),2)
+        self.assertTrue(all(r['finite'] is False and r['passed'] is False and r['max_abs'] is None
+                            and r['relative'] is None for r in rows))
+        json.dumps(rows,allow_nan=False);self.assertEqual(f.owner.n_forward,0)
+        f.owner.destroy.assert_called_once()
+
+    def test_private_runtime_or_trace_keys_rejected_before_transport(self):
+        for key in ('_minimax_sp_runtime_operation_id','_minimax_sp_block0_trace_request','_minimax_sp_block0_trace_result'):
+            with self.subTest(key=key):
+                f=complete_group_fixture(world2_good=True);f.args[5][key]=1
+                with self.assertRaisesRegex(RuntimeError,'reserved runtime option'):f.complete(*f.args)
+                f.dist.broadcast_object_list.assert_not_called()
+                self.assertNotIn(('sp',2),f.events)
+
+    def test_actual_route_guard_options_and_runtime_are_not_verify_dependent(self):
+        source=ast.parse(AFTER.read_text());group=ast.parse(GROUP_SOURCE.read_text())
+        constants={n.targets[0].id:ast.literal_eval(n.value) for n in source.body
+                   if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name)
+                   and n.targets[0].id in ('SP_COMPLETE_RECIPE','FULL_M_DIAGNOSTIC_PROBE_ONLY')}
+        self.assertEqual(constants,{'SP_COMPLETE_RECIPE':True,'FULL_M_DIAGNOSTIC_PROBE_ONLY':False})
+        fn=next(n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='sp_forward')
+        text=ast.unparse(fn)
+        self.assertIn('not SP_COMPLETE_RECIPE',text)
+        self.assertIn('CompleteOutProjScope(dit, ctx) if SP_COMPLETE_RECIPE and ctx.world == 2',text)
+        self.assertIn('full_head_execute(dit, h, t_emb',text)
+        self.assertIn('complete_runtime_receipt(ctx',text)
+        owner=next(n for n in group.body if isinstance(n,ast.ClassDef) and n.name=='SPGroup')
+        init=next(n for n in owner.body if isinstance(n,ast.FunctionDef) and n.name=='__init__')
+        init_text=ast.unparse(init)
+        self.assertLess(init_text.index('SP_COMPLETE_RECIPE'),init_text.index('dist.is_initialized'))
+        self.assertIn('world != 2',init_text)
+        forward=next(n for n in owner.body if isinstance(n,ast.FunctionDef) and n.name=='forward')
+        self.assertIn('forward_complete_recipe',ast.unparse(forward.body[0]))
+        allowlist=next(n for n in group.body if isinstance(n,ast.Assign)
+                      and any(isinstance(t,ast.Name) and t.id=='TO_WORKER_OPTIONS' for t in n.targets))
+        self.assertIn('spf.RUNTIME_OPERATION_KEY',ast.unparse(allowlist))
 
 
 if __name__ == "__main__":
