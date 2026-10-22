@@ -46,6 +46,146 @@ from comfy.ldm.minimax.model import (
 )
 from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 
+# BEGIN reviewed block0 diagnostic trace
+BLOCK0_TRACE_REQUEST = "_minimax_sp_block0_trace_request"
+BLOCK0_TRACE_RESULT = "_minimax_sp_block0_trace_result"
+BLOCK0_TRACE_POINTS = tuple(name + suffix for name in
+    ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
+    for suffix in (".pre", ".post")) + ("block0.post",)
+
+
+class Block0Trace:
+    """Diagnostic CPU samples only; hooks never change a model result.
+
+    Each point copies seven global rows (all features) per SP rank immediately,
+    before native in-place RoPE/residual updates can change those rows. The
+    native oracle samples the union of both ranks' rows. No tensor is logged.
+    """
+    def __init__(self, dit, *, rank, start, stop, rows=None):
+        self.dit, self.rank, self.start, self.stop = dit, rank, start, stop
+        count = stop - start
+        self.rows = (sorted({start + i * (count - 1) // 6 for i in range(7)})
+                     if rows is None and count > 0 else list(rows or []))
+        self.entries, self.errors, self.handles = {}, [], []
+        self.entered = False
+
+    def _capture(self, point, tensor):
+        try:
+            if point in self.entries:
+                raise RuntimeError("duplicate_trace_point")
+            if not isinstance(tensor, torch.Tensor) or tensor.ndim != 2:
+                raise RuntimeError("trace_requires_matrix")
+            if tensor.shape[0] != self.stop - self.start or not self.rows:
+                raise RuntimeError("trace_row_extent_mismatch")
+            if self.rows != sorted(set(self.rows)) or any(
+                    row < self.start or row >= self.stop for row in self.rows):
+                raise RuntimeError("trace_global_rows_invalid")
+            local_rows = [row - self.start for row in self.rows]
+            samples = tensor[local_rows].detach().to(device="cpu").clone()
+            minimum, maximum = torch.aminmax(tensor.detach())
+            self.entries[point] = {
+                "shape": list(tensor.shape), "dtype": str(tensor.dtype),
+                "rows": list(self.rows), "samples": samples,
+                "amax": max(abs(minimum.item()), abs(maximum.item())),
+                "finite": bool(torch.isfinite(minimum)) and bool(torch.isfinite(maximum)),
+            }
+        except Exception as exc:
+            self.errors.append(type(exc).__name__)
+
+    def __enter__(self):
+        if self.entered:
+            raise RuntimeError("block0_trace_reentry")
+        self.entered = True
+        try:
+            block = self.dit.blocks[0]
+            for name, module in (("attn.qkv_proj", block.attn.qkv_proj),
+                                 ("attn.out_proj", block.attn.out_proj),
+                                 ("mlp.fc1", block.mlp.fc1), ("mlp.fc2", block.mlp.fc2)):
+                def before(_module, inputs, point=name + ".pre"):
+                    self._capture(point, inputs[0] if inputs else None)
+                def after(_module, _inputs, output, point=name + ".post"):
+                    self._capture(point, output)
+                self.handles.append(module.register_forward_pre_hook(before))
+                self.handles.append(module.register_forward_hook(after))
+            self.handles.append(block.register_forward_hook(
+                lambda _module, _inputs, output: self._capture("block0.post", output)))
+        except Exception as exc:
+            self.errors.append(type(exc).__name__)
+            self._remove()
+        return self
+
+    def _remove(self):
+        while self.handles:
+            handle = self.handles.pop()
+            try:
+                handle.remove()
+            except Exception as exc:
+                self.errors.append(type(exc).__name__)
+
+    def __exit__(self, _kind, _value, _traceback):
+        self._remove()
+        return False
+
+    def packet(self):
+        return {"rank": self.rank, "start": self.start, "stop": self.stop,
+                "rows": list(self.rows), "errors": list(self.errors),
+                "entries": self.entries}
+
+
+def block0_trace_rows(packets):
+    """Validate rank/window identity before installing native-oracle hooks."""
+    if not isinstance(packets, list) or len(packets) != 2:
+        raise RuntimeError("block0_trace_requires_two_rank_packets")
+    cursor = 0
+    rows = []
+    for rank, packet in enumerate(packets):
+        if (not isinstance(packet, dict) or packet.get("rank") != rank
+                or packet.get("start") != cursor or packet.get("stop", cursor) <= cursor
+                or packet.get("errors") or set(packet.get("entries", {})) != set(BLOCK0_TRACE_POINTS)):
+            raise RuntimeError("block0_trace_rank_packet_invalid")
+        stop = packet["stop"]
+        expected = sorted({cursor + i * (stop - cursor - 1) // 6 for i in range(7)})
+        if packet.get("rows") != expected:
+            raise RuntimeError("block0_trace_sample_rows_invalid")
+        rows.extend(expected)
+        cursor = stop
+    return rows, cursor
+
+
+def block0_trace_summary(packets, native):
+    """Sampled-row parity, not full-layer parity; return scalars/metadata only."""
+    rows, total = block0_trace_rows(packets)
+    if (native.get("errors") or native.get("start") != 0 or native.get("stop") != total
+            or native.get("rows") != rows or set(native.get("entries", {})) != set(BLOCK0_TRACE_POINTS)):
+        raise RuntimeError("block0_trace_native_packet_invalid")
+    result = []
+    for point in BLOCK0_TRACE_POINTS:
+        expected = native["entries"][point]
+        if (expected["rows"] != rows or expected["shape"][0] != total
+                or list(expected["samples"].shape) != [len(rows), expected["shape"][1]]):
+            raise RuntimeError("block0_trace_native_sample_shape_invalid")
+        global_amax = max(packet["entries"][point]["amax"] for packet in packets)
+        for packet in packets:
+            actual = packet["entries"][point]
+            if (actual["rows"] != packet["rows"]
+                    or actual["shape"] != [packet["stop"] - packet["start"], expected["shape"][1]]
+                    or actual["dtype"] != expected["dtype"]
+                    or list(actual["samples"].shape) != [len(packet["rows"]), expected["shape"][1]]):
+                raise RuntimeError("block0_trace_sp_sample_shape_invalid")
+            selected = expected["samples"][[rows.index(row) for row in packet["rows"]]].float()
+            sampled = actual["samples"].float()
+            delta = (sampled - selected).abs().max().item()
+            denominator = max(selected.abs().max().item(), 1e-12)
+            result.append({"rank": packet["rank"], "point": point,
+                           "shape": actual["shape"], "dtype": actual["dtype"],
+                           "sampled_rows": len(packet["rows"]), "global_rows": actual["rows"],
+                           "finite": actual["finite"] and expected["finite"],
+                           "max_abs": delta, "relative": delta / denominator,
+                           "sp_local_amax": actual["amax"], "sp_global_amax": global_amax,
+                           "native_global_amax": expected["amax"]})
+    return result
+# END reviewed block0 diagnostic trace
+
 # BEGIN reviewed SP2 activation amax scope
 _SP_NVFP4_TICKET = ContextVar('minimax_sp_nvfp4_activation_ticket', default=None)
 _SP_NVFP4_LOCK = threading.Lock()
@@ -552,10 +692,14 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
         _prof_acc["pre"] = time.perf_counter() - t_fwd
 
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(dit.blocks), device, transformer_options)
+    # BEGIN reviewed block0 trace scope
+    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop)
+             if ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True else None)
+    # END reviewed block0 trace scope
     # BEGIN reviewed SP2 activation amax loop
     scale_context = (SPNVFP4AmaxScope(dit, ctx, torch_module=torch, dist_module=dist,
                                     quant_ops=comfy.quant_ops) if ctx.world == 2 else nullcontext())
-    with scale_context as scale_scope:
+    with scale_context as scale_scope, (trace if trace is not None else nullcontext()):
         for i, block in enumerate(dit.blocks):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
             transformer_options["block_index"] = i
@@ -590,6 +734,15 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
         v = _gather_rows(v_local, counts_for(video_seg), ctx, v_local.shape[-1], device)
         a = _gather_rows(a_local, counts_for(audio_seg), ctx, a_local.shape[-1], device)
+    # BEGIN reviewed block0 trace gather
+    if trace is not None:
+        packets = [None] * ctx.world
+        # Only verification's first SP2 forward enters this one extra collective.
+        # Samples stay internal, after all normal SP output collectives complete.
+        dist.all_gather_object(packets, trace.packet(), group=ctx.group)
+        if rank == 0:
+            transformer_options[BLOCK0_TRACE_RESULT] = packets
+    # END reviewed block0 trace gather
     if PROFILE_OPS and rank == 0:
         prof_report(time.perf_counter() - t_fwd)
     if rank != 0:

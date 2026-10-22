@@ -23,8 +23,28 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+BLOCK0_REVIEWED_BLOCKS = {'class': ('# BEGIN reviewed block0 diagnostic trace\n', '# END reviewed block0 diagnostic trace\n\n', '7ada8a396f9a99192ae927268f808bcf44b425d365ae2fd048a2bd2804387326'), 'scope': ('    # BEGIN reviewed block0 trace scope\n', '    # END reviewed block0 trace scope\n', '0d062e08e33d1df72cc597dfba34d186ca444531f11cab7ed8f2909b2434a26b'), 'gather': ('    # BEGIN reviewed block0 trace gather\n', '    # END reviewed block0 trace gather\n', '7cca78719d17d2ae116fea9feca89bbbd90d6f3fda4a270d68ff063abbfcb2c8')}
+
+def reverse_block0_trace(source):
+    for start,stop,digest in BLOCK0_REVIEWED_BLOCKS.values():
+        if source.count(start)!=1 or source.count(stop)!=1:
+            raise AssertionError('block0 trace reviewed markers changed')
+        lo=source.index(start);hi=source.index(stop,lo)+len(stop)
+        if hashlib.sha256(source[lo:hi].encode()).hexdigest()!=digest:
+            raise AssertionError('block0 trace reviewed block digest changed')
+        source=source[:lo]+source[hi:]
+    old='    with scale_context as scale_scope, (trace if trace is not None else nullcontext()):\n'
+    if source.count(old)!=1:
+        raise AssertionError('block0 trace reviewed loop changed')
+    source=source.replace(old,'    with scale_context as scale_scope:\n',1)
+    if hashlib.sha256(source.encode()).hexdigest()!='c64d8912fd2b99df1c02ebc4ed76d48ec221dae31c3746cf96ec5cc63349c2b0':
+        raise AssertionError('reviewed block digest: block0 reversal differs from prior global-amax source')
+    return source
+
+
 def reverse_amax_scope(source):
     """Reverse only reviewed exact imports/scope/loop; retain original upstream SHA."""
+    source = reverse_block0_trace(source)
     for name,(start,stop,digest) in AMAX_REVIEWED_BLOCKS.items():
         if source.count(start)!=1 or source.count(stop)!=1:
             raise AssertionError('SP2 amax reviewed block markers changed')
@@ -349,6 +369,11 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             raise AssertionError('original world2 dispatch changed')
         return sp2
 
+    class Trace:
+        def __init__(self,*a,**kw): pass
+        def __enter__(self): return self
+        def __exit__(self,*a): return False
+        def packet(self): return {}
     log = Mock(spec=logging)
     def logged(fmt, *args):
         events.append(('log', fmt % args))
@@ -361,7 +386,12 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
     ns = {'torch':ParityTorchCPU, 'logging':log,
         'os':SimpleNamespace(environ={'MINIMAX_SP_PROFILE':'1'} if profile else {}),
         'time':SimpleNamespace(perf_counter=lambda:1.), 'dist':dist,
-        'spf':SimpleNamespace(validate_transformer_options=Mock(), sp_forward=dispatch),
+        'nullcontext':__import__('contextlib').nullcontext, 'json':json,
+        'spf':SimpleNamespace(validate_transformer_options=Mock(), sp_forward=dispatch,
+            BLOCK0_TRACE_REQUEST='_minimax_sp_block0_trace_request', BLOCK0_TRACE_RESULT='_minimax_sp_block0_trace_result',
+            block0_trace_rows=Mock(return_value=([0,1],2)),
+            Block0Trace=Trace,
+            block0_trace_summary=Mock(return_value=[])),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -369,7 +399,7 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
     parity, forward = parity_functions(ns)
     args = (owner, Dit(), [ParityArray([0]), ParityArray([0])], None, None, {}, {}, None, None)
     return SimpleNamespace(parity=parity, forward=forward, args=args, owner=owner,
-        native=native, events=events, dist=dist, log=log)
+        native=native, events=events, dist=dist, log=log, namespace=ns)
 
 
 class MirrorDiagnosticTests(unittest.TestCase):
@@ -673,7 +703,7 @@ class GlobalAmaxIntegrationTests(unittest.TestCase):
                 def block(*args):events.append('block');return args[1]+1
                 namespace={'SPNVFP4AmaxScope':Scope,'nullcontext':__import__('contextlib').nullcontext,
                     'dit':SimpleNamespace(blocks=list(range(50))),'ctx':SimpleNamespace(world=world),
-                    'torch':object(),'dist':object(),'rank':0,'prefetch_queue':None,'device':'cpu',
+                    'torch':object(),'dist':object(),'rank':0,'prefetch_queue':None,'device':'cpu','trace':None,
                     'comfy':SimpleNamespace(quant_ops=object(),model_prefetch=SimpleNamespace(prefetch_queue_pop=lambda *a,**k:None)),
                     'transformer_options':{},'h':0,'t_emb':None,'local_segments':None,'rope_for_blocks':None,
                     'sp_block':block,'os':SimpleNamespace(environ={'MINIMAX_SP_VERIFY':'1'}),
@@ -684,6 +714,256 @@ class GlobalAmaxIntegrationTests(unittest.TestCase):
                     self.assertEqual(events,['block']*50)
                 else:
                     self.assertEqual(events,['construct','enter']+['block']*50+['restore','counts','log'])
+
+
+"""Portable CPU test fragment for the real block-0 diagnostic trace AST.
+
+Append before the existing unittest.main guard in test_minimax_sp_pdd.py.
+NumPy models storage/hooks only: these tests do not validate CUDA, NVFP4,
+distributed collectives, full-row parity, or any generated media.
+"""
+import ast as _b0t_ast
+from contextlib import nullcontext as _b0t_nullcontext
+import json as _b0t_json
+from pathlib import Path as _B0TPath
+from types import SimpleNamespace as _B0TNamespace
+import unittest as _b0t_unittest
+
+import numpy as _b0t_np
+
+
+def _b0t_source_path():
+    if "AFTER" in globals():
+        return _B0TPath(globals()["AFTER"])
+    return (_B0TPath(__file__).resolve().parent / "comfy-omni-deployment" /
+            "custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py")
+
+
+class _B0TTensor:
+    def __init__(self, value):
+        self.value = _b0t_np.asarray(value, dtype=_b0t_np.float32)
+        self.dtype = "torch.float32"
+
+    @property
+    def shape(self):
+        return self.value.shape
+
+    @property
+    def ndim(self):
+        return self.value.ndim
+
+    def __getitem__(self, item):
+        return _B0TTensor(self.value[item])
+
+    def detach(self):
+        return self
+
+    def to(self, *, device):
+        if device != "cpu":
+            raise AssertionError("test only permits CPU snapshots")
+        return self
+
+    def clone(self):
+        return _B0TTensor(self.value.copy())
+
+    def abs(self):
+        return _B0TTensor(abs(self.value))
+
+    def max(self):
+        return _B0TTensor(self.value.max())
+
+    def item(self):
+        return float(self.value.item())
+
+    def float(self):
+        return self
+
+    def all(self):
+        return bool(self.value.all())
+
+    def __sub__(self, other):
+        return _B0TTensor(self.value - other.value)
+
+
+class _B0TModule:
+    def __init__(self, function=None):
+        self.function = function or (lambda tensor, *args, **kwargs: tensor)
+        self.before, self.after = [], []
+        self.reject_registration = False
+
+    def _register(self, target, hook):
+        if self.reject_registration:
+            raise ValueError("private exception text must not enter a packet")
+        target.append(hook)
+        return _B0TNamespace(remove=lambda: target.remove(hook))
+
+    def register_forward_pre_hook(self, hook):
+        return self._register(self.before, hook)
+
+    def register_forward_hook(self, hook):
+        return self._register(self.after, hook)
+
+    def __call__(self, tensor, *args, **kwargs):
+        for hook in tuple(self.before):
+            hook(self, (tensor, *args))
+        output = self.function(tensor, *args, **kwargs)
+        for hook in tuple(self.after):
+            hook(self, (tensor, *args), output)
+        return output
+
+
+def _b0t_model():
+    modules = [_B0TModule(lambda tensor, factor=factor:
+                         _B0TTensor(tensor.value * factor))
+               for factor in (2, 3, 4, 5)]
+
+    def block_forward(tensor, *args, **kwargs):
+        for module in modules:
+            tensor = module(tensor)
+        return tensor
+
+    block = _B0TModule(block_forward)
+    block.attn = _B0TNamespace(qkv_proj=modules[0], out_proj=modules[1])
+    block.mlp = _B0TNamespace(fc1=modules[2], fc2=modules[3])
+    return _B0TNamespace(blocks=[block]), modules + [block]
+
+
+def _b0t_load():
+    parsed = _b0t_ast.parse(_b0t_source_path().read_text())
+    symbols = {"Block0Trace", "block0_trace_rows", "block0_trace_summary", "sp_block"}
+    selected = [node for node in parsed.body if
+                isinstance(node, (_b0t_ast.FunctionDef, _b0t_ast.ClassDef))
+                and node.name in symbols or
+                isinstance(node, _b0t_ast.Assign) and any(
+                    isinstance(target, _b0t_ast.Name)
+                    and target.id == "BLOCK0_TRACE_POINTS" for target in node.targets)]
+    namespace = {"torch": _B0TNamespace(
+        Tensor=_B0TTensor,
+        aminmax=lambda tensor: (_B0TTensor(tensor.value.min()),
+                                _B0TTensor(tensor.value.max())),
+        isfinite=lambda tensor: _B0TTensor(_b0t_np.isfinite(tensor.value))),
+        "region": lambda _name: _b0t_nullcontext(),
+        "sp_attention": lambda *args, **kwargs: None}
+    exec(compile(_b0t_ast.Module(body=selected, type_ignores=[]),
+                 str(_b0t_source_path()), "exec"), namespace)
+    return _B0TNamespace(**namespace)
+
+
+class Block0TraceMetadataTests(_b0t_unittest.TestCase):
+    def setUp(self):
+        self.api = _b0t_load()
+
+    def _packet(self, rank, start, stop, rows=None):
+        model, modules = _b0t_model()
+        tensor = _B0TTensor(_b0t_np.arange(start * 3, stop * 3).reshape(-1, 3))
+        with self.api.Block0Trace(model, rank=rank, start=start, stop=stop,
+                                  rows=rows) as trace:
+            # Exercise actual sp_block AST, including block.__call__ hooks.
+            self.api.sp_block(model.blocks[0], tensor, None, None, None,
+                              _B0TNamespace(), {})
+        self.assertTrue(all(not module.before and not module.after for module in modules))
+        return trace.packet()
+
+    def _packets(self):
+        packets = [self._packet(0, 0, 10), self._packet(1, 10, 19)]
+        rows, total = self.api.block0_trace_rows(packets)
+        return packets, self._packet(0, 0, total, rows)
+
+    def test_real_sp_block_hook_route_and_global_row_alignment(self):
+        packets, native = self._packets()
+        result = self.api.block0_trace_summary(packets, native)
+        self.assertEqual(len(result), 18)
+        self.assertTrue(all(row["max_abs"] == 0 and row["relative"] == 0 for row in result))
+        self.assertTrue(all(row["sampled_rows"] == 7 for row in result))
+        self.assertGreater(min(packets[1]["rows"]), max(packets[0]["rows"]))
+        encoded = _b0t_json.dumps(result, allow_nan=False)
+        self.assertNotIn("samples", encoded)
+        self.assertNotIn("private exception", encoded)
+
+    def test_snapshot_does_not_alias_inplace_source_and_all_features_retained(self):
+        model, _ = _b0t_model()
+        tensor = _B0TTensor(_b0t_np.arange(60).reshape(10, 6))
+        trace = self.api.Block0Trace(model, rank=0, start=0, stop=10)
+        trace._capture("attn.qkv_proj.post", tensor)
+        snapshot = trace.packet()["entries"]["attn.qkv_proj.post"]["samples"]
+        saved = snapshot.value.copy()
+        tensor.value[:] = -999
+        _b0t_np.testing.assert_array_equal(snapshot.value, saved)
+        self.assertEqual(snapshot.shape, (7, 6))
+
+    def test_partial_hook_registration_failure_cleans_every_installed_hook(self):
+        model, modules = _b0t_model()
+        modules[1].reject_registration = True
+        with self.api.Block0Trace(model, rank=0, start=0, stop=10) as trace:
+            self.assertEqual(trace.packet()["errors"], ["ValueError"])
+            self.assertTrue(all(not module.before and not module.after for module in modules))
+        self.assertEqual(trace.handles, [])
+
+    def test_body_exception_propagates_and_removes_hooks(self):
+        model, modules = _b0t_model()
+        with self.assertRaisesRegex(RuntimeError, "body_failed"):
+            with self.api.Block0Trace(model, rank=0, start=0, stop=10):
+                raise RuntimeError("body_failed")
+        self.assertTrue(all(not module.before and not module.after for module in modules))
+
+    def test_missing_point_errors_duplicate_rank_and_row_mismatch_rejected(self):
+        mutations = [lambda packets: packets[0]["entries"].pop("mlp.fc2.post"),
+                     lambda packets: packets[1].update(rank=0),
+                     lambda packets: packets[1].update(errors=["RuntimeError"]),
+                     lambda packets: packets[1]["rows"].__setitem__(0, 0),
+                     lambda packets: packets[1]["entries"]["mlp.fc1.pre"].update(dtype="other")]
+        for mutate in mutations:
+            with self.subTest(mutation=mutations.index(mutate)):
+                packets, native = self._packets()
+                mutate(packets)
+                with self.assertRaises(RuntimeError):
+                    self.api.block0_trace_summary(packets, native)
+
+    def test_numeric_difference_at_correct_point_rank_and_finite_not_promoted(self):
+        packets, native = self._packets()
+        entry = packets[1]["entries"]["attn.qkv_proj.post"]
+        entry["samples"].value[0, 0] += 8
+        entry["finite"] = False
+        result = self.api.block0_trace_summary(packets, native)
+        changed = [row for row in result if row["max_abs"] != 0]
+        self.assertEqual(len(changed), 1)
+        self.assertEqual((changed[0]["rank"], changed[0]["point"]),
+                         (1, "attn.qkv_proj.post"))
+        self.assertEqual(changed[0]["max_abs"], 8)
+        self.assertFalse(changed[0]["finite"])
+
+
+
+
+class Block0TraceGroupGateTests(unittest.TestCase):
+    def test_trace_packet_failure_cannot_accept_passing_native_parity(self):
+        f = parity_fixture(world2_good=True)
+        f.namespace['spf'].block0_trace_rows.side_effect = RuntimeError('invalid_packet_fixture')
+        with self.assertRaisesRegex(RuntimeError, 'diagnostic evidence incomplete'):
+            f.forward(*f.args)
+        f.owner.destroy.assert_called_once()
+        self.assertTrue(f.owner.verify_pending)
+        self.assertNotIn(('sp',1),f.events)
+        self.assertEqual(f.args[5],{})
+
+    def test_trace_summary_failure_keeps_original_failed_gate_and_world1(self):
+        f = parity_fixture()
+        f.namespace['spf'].block0_trace_summary.side_effect = RuntimeError('summary_fixture')
+        with self.assertRaisesRegex(RuntimeError, 'video differs from native H3'):
+            f.forward(*f.args)
+        self.assertIn(('sp',1),f.events)
+        f.owner.destroy.assert_called_once()
+        self.assertEqual(f.args[5],{})
+
+    def test_formal_path_keeps_original_options_and_has_no_trace_oracle(self):
+        f = parity_fixture(verify=False)
+        dispatch = Mock(wraps=f.namespace['spf'].sp_forward)
+        f.namespace['spf'].sp_forward = dispatch
+        f.forward(*f.args)
+        self.assertIs(dispatch.call_args.args[4], f.args[5])
+        f.namespace['spf'].block0_trace_rows.assert_not_called()
+        f.namespace['spf'].block0_trace_summary.assert_not_called()
+        self.assertEqual(f.args[5],{})
 
 
 if __name__ == "__main__":

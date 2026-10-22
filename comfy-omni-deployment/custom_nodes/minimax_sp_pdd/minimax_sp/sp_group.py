@@ -11,6 +11,7 @@ cache-invalidation class of bugs.
 """
 
 import atexit
+from contextlib import nullcontext
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from . import sp_forward as spf
 from . import sp_patches as patch_sync
 
 REF_META_KEYS = ("kind", "latent_h", "latent_w", "latent_t", "ref_audio_t")
-TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars")
+TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars", spf.BLOCK0_TRACE_REQUEST)
 
 _GROUPS = {}
 
@@ -318,9 +319,17 @@ class SPGroup:
             raise RuntimeError("MiniMax SP denoise prohibited: patches have not been acknowledged")
         spf.validate_transformer_options(transformer_options)
         profile = os.environ.get("MINIMAX_SP_PROFILE")
+        # Private per-call namespace; never copy samples into caller options,
+        # later forwards, the native oracle, or the world1 mirror.
+        trace_requested = self.verify_pending and self.world == 2
+        sp_options = transformer_options.copy() if trace_requested else transformer_options
+        if any(key in transformer_options for key in (spf.BLOCK0_TRACE_REQUEST, spf.BLOCK0_TRACE_RESULT)):
+            raise RuntimeError("MiniMax SP reserved diagnostic option in caller state")
+        if trace_requested:
+            sp_options[spf.BLOCK0_TRACE_REQUEST] = True
         try:
             t_disp = time.perf_counter()
-            meta = build_meta(x, timestep, context, transformer_options, payload)
+            meta = build_meta(x, timestep, context, sp_options, payload)
             meta["operation_id"] = self.operation_id + 1
             meta["denoise_mask"] = tensor_meta(denoise_mask)
             meta["audio_denoise_mask"] = tensor_meta(audio_denoise_mask)
@@ -334,21 +343,43 @@ class SPGroup:
             device = x[0].device
             if transformer_options.get("sample_sigmas") is not None:
                 transformer_options["sample_sigmas"] = transformer_options["sample_sigmas"].to(device)
+                sp_options["sample_sigmas"] = transformer_options["sample_sigmas"]
             for t in [*ordered_tensors(x, timestep, context, transformer_options, payload), denoise_mask, audio_denoise_mask]:
                 if t is not None:
                     dist.broadcast(t.to(device).contiguous(), src=0, group=self.tensor_pg)
             if profile:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
-            out = spf.sp_forward(dit, x, timestep, context, transformer_options, payload,
+            out = spf.sp_forward(dit, x, timestep, context, sp_options, payload,
                                  0, self.world, self.tensor_pg, denoise_mask, audio_denoise_mask)
             if self.verify_pending:
                 # Verification only: compare the actual loaded ranks to native H3 before accepting a step.
-                reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),
-                                                minimax_payload=payload, denoise_mask=denoise_mask,
-                                                audio_denoise_mask=audio_denoise_mask)
+                trace_error = None
+                native_trace = None
+                packets = sp_options.pop(spf.BLOCK0_TRACE_RESULT, None)
+                if trace_requested:
+                    try:
+                        rows, total = spf.block0_trace_rows(packets)
+                        native_trace = spf.Block0Trace(dit, rank=-1, start=0, stop=total, rows=rows)
+                    except Exception as exc:
+                        trace_error = type(exc).__name__
+                with native_trace if native_trace is not None else nullcontext():
+                    reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),
+                                                    minimax_payload=payload, denoise_mask=denoise_mask,
+                                                    audio_denoise_mask=audio_denoise_mask)
                 checks = native_parity_metrics(out, reference)
                 failed = [row for row in checks if not row["passed"]]
+                if native_trace is not None:
+                    try:
+                        summaries = spf.block0_trace_summary(packets, native_trace.packet())
+                        for row in summaries:
+                            logging.info("[minimax_sp][block0_trace] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                    except Exception as exc:
+                        trace_error = type(exc).__name__
+                if trace_error is not None:
+                    logging.info("[minimax_sp][block0_trace_error] kind=%s", trace_error)
+                # Drop CPU samples before any additional world1 forward.
+                packets = native_trace = None
                 if failed:
                     # One extra forward only on failed verification. The same loaded
                     # rank-0 DiT and full payload distinguish a mirror discrepancy
@@ -360,6 +391,8 @@ class SPGroup:
                                  all(row["passed"] for row in mirror_checks))
                     first = failed[0]
                     raise RuntimeError(f"[minimax_sp] {first['label']} differs from native H3: relative={first['relative']}")
+                if trace_error is not None:
+                    raise RuntimeError("MiniMax SP block0 diagnostic evidence incomplete")
                 self.verify_pending = False
             if profile:
                 torch.cuda.synchronize()
@@ -377,6 +410,8 @@ class SPGroup:
             logging.error("[minimax_sp] forward failed; rebuilding the group on the next prompt: %s", exc)
             self.destroy()
             raise
+        finally:
+            sp_options.pop(spf.BLOCK0_TRACE_RESULT, None)
 
     def destroy(self):
         # Do not broadcast shutdown into a failed collective.
