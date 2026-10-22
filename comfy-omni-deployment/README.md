@@ -1,14 +1,14 @@
 # FastH3 Omni 原生 ComfyUI 对照
 
-## 双实例与 SP2 实验入口（2026-10-22，本地验证阶段）
+## 双实例与 SP2 实验入口（2026-10-22，GPU验证进行中）
 
 新增 `--instance gpu0`（GPU0、8189）与 `--instance gpu1`（GPU1、8190），分别拥有独立的状态锁、输入、输出、用户目录和临时目录。默认实例继续使用原8188；同一GPU的实例互斥，停止仍必须匹配本实例owner/PID/启动时刻/进程组。两个单卡实例并发衡量吞吐量，不等于一次请求的TP/SP。
 
 `--instance sp2` 独占两张5090、端口8191，使用相同Comfy pin和四份已校验权重。主DiT是NVFP4 QAD，文本/视觉编码器是NVFP4 AWQ，video VAE FP16、audio VAE FP32；未改成FP8。SP2只启用随包固定的`minimax_sp_pdd`节点；`--disable-all-custom-nodes`配合这个唯一白名单，不表示该实例没有自定义节点。
 
-节点来自[buqi-minimax-h3-multigpu](https://github.com/buqi-code/buqi-minimax-h3-multigpu/tree/a864277f81ee7609972eb64cd1fb086f239d4c99)，保留MIT许可证，仅修正最终视频/音频all-gather采用实际输出宽度，以适配本模型32个PDD输出头。每个文件SHA和补丁边界见[sp-node-contract.json](sp-node-contract.json)。这是复制DiT权重、切分序列的Ulysses SP，未实现DiT TP。原生`MultiGPU CFG Split`在本CFG1配方上不提供所需TP/SP加速。
+节点来自[buqi-minimax-h3-multigpu](https://github.com/buqi-code/buqi-minimax-h3-multigpu/tree/a864277f81ee7609972eb64cd1fb086f239d4c99)，保留MIT许可证，本地补丁让最终视频/音频all-gather采用实际输出宽度，以适配本模型32个PDD输出头，并使用目标Torch提供的`all_gather_into_tensor` API。每个文件SHA和补丁边界见[sp-node-contract.json](sp-node-contract.json)。这是复制DiT权重、切分序列的Ulysses SP，未实现DiT TP。原生`MultiGPU CFG Split`在本CFG1配方上不提供所需TP/SP加速。
 
-`--sp-verify --sp-profile`仅可用于sp2诊断：首个SP forward额外与原生forward比较，且逐步同步计时。该诊断不计入正式速度。必须先通过真实双卡数值检查与正常清理，再关闭这两个开关做正式对照。当前仅有CPU形状/控制器检查，尚无本次SP2或双实例GPU性能结果；不得将本节描述为部署或速度验收。
+`--sp-verify --sp-profile`仅可用于sp2诊断：首个SP forward额外与原生forward比较，且逐步同步计时。该诊断不计入正式速度。必须先通过真实双卡数值检查与正常清理，再关闭这两个开关做正式对照。初次GPU诊断已完成双rank模型加载，但首forward在最终gather处因上游调用不存在的`all_gather_single`而失败；没有有效视频，owned实例已正常停止并通过两次空闲检查。目标Torch2.12.0+cu130实测提供`all_gather_into_tensor`，本修复改用该API；修复后的完整SP2数值及性能仍待验。双实例测试进行中，尚无完整性能结论。
 
 所有服务绑定loopback；实验复用已密封的业务协议，cap480参考、480×832/362帧/24fps/8步/CFG1，逐次换seed。视频和抽帧由用户人工审阅。与FastVideo对照仍是完整部署配方比较，Comfy使用dense attention及FP16视频VAE。
 

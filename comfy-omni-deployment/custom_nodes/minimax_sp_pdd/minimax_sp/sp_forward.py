@@ -204,7 +204,7 @@ def _gather_rows(local, counts, ctx, out_dim, device):
     if local is not None:
         buf[:local.shape[0]] = local
     gathered = torch.empty(ctx.world * maxn, out_dim, dtype=torch.float32, device=buf.device)
-    dist.all_gather_single(gathered, buf, group=ctx.group)
+    dist.all_gather_into_tensor(gathered, buf, group=ctx.group)
     gathered = gathered.view(ctx.world, maxn, out_dim)
     return torch.cat([gathered[r, :counts[r]] for r in range(ctx.world) if counts[r] > 0], dim=0)
 
