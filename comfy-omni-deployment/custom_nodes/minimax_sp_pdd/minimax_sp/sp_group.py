@@ -360,7 +360,8 @@ class SPGroup:
                 if trace_requested:
                     try:
                         rows, total = spf.block0_trace_rows(packets)
-                        native_trace = spf.Block0Trace(dit, rank=-1, start=0, stop=total, rows=rows)
+                        native_trace = spf.Block0Trace(dit, rank=-1, start=0, stop=total, rows=rows,
+                            hash_windows=[(packet["start"], packet["stop"]) for packet in packets])
                     except Exception as exc:
                         trace_error = type(exc).__name__
                 with native_trace if native_trace is not None else nullcontext():
@@ -374,6 +375,9 @@ class SPGroup:
                         summaries = spf.block0_trace_summary(packets, native_trace.packet())
                         for row in summaries:
                             logging.info("[minimax_sp][block0_trace] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        hash_summaries = spf.layer_hash_summary(packets, native_trace.packet())
+                        for row in hash_summaries:
+                            logging.info("[minimax_sp][layer_hash] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                         head_summaries = spf.head_metadata_summary(packets, native_trace.packet())
                         for row in head_summaries:
                             logging.info("[minimax_sp][head_metadata] %s", json.dumps(row, sort_keys=True, allow_nan=False))

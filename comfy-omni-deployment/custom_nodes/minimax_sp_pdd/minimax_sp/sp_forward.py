@@ -22,7 +22,10 @@ import types
 # END reviewed SP2 activation amax imports
 
 import logging
+import hashlib
+import json
 import os
+import sys
 import time
 
 import torch
@@ -49,6 +52,8 @@ from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_atte
 # BEGIN reviewed block0 diagnostic trace
 BLOCK0_TRACE_REQUEST = "_minimax_sp_block0_trace_request"
 BLOCK0_TRACE_RESULT = "_minimax_sp_block0_trace_result"
+TRACE_PROJECTION_BLOCK = 36
+TRACE_HASH_CHUNK_BYTES = 16 * 1024 * 1024
 BLOCK0_TRACE_POINTS = tuple(name + suffix for name in
     ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
     for suffix in (".pre", ".post")) + tuple(f"block{index}.post" for index in range(50))
@@ -56,6 +61,47 @@ HEAD_METADATA_DTYPES = ("torch.float32", "torch.bfloat16", "torch.float16",
                         "torch.float8_e4m3fn", "torch.float8_e5m2")
 HEAD_METADATA_QUANT = ("nvfp4", "fp8_e4m3fn", "fp8_e5m2", "mxfp8")
 HEAD_METADATA_LAYOUTS = ("TensorCoreNVFP4Layout", "TensorCoreFP8Layout", "TensorCoreMXFP8Layout")
+
+
+def streamed_tensor_sha256(tensor, *, tensor_global_start, global_start, global_stop,
+                          chunk_limit_bytes=TRACE_HASH_CHUNK_BYTES):
+    """Hash original scalar bits in logical C order, one bounded CPU copy at a time."""
+    if (sys.byteorder != "little" or tensor.ndim != 2
+            or type(chunk_limit_bytes) is not int or not 0 < chunk_limit_bytes <= TRACE_HASH_CHUNK_BYTES
+            or not tensor_global_start <= global_start < global_stop <= tensor_global_start + tensor.shape[0]):
+        raise RuntimeError("layer_hash_window_or_byte_order_invalid")
+    width = tensor.shape[1]
+    row_bytes = width * tensor.element_size()
+    if row_bytes <= 0 or row_bytes > chunk_limit_bytes:
+        raise RuntimeError("layer_hash_row_exceeds_chunk_limit")
+    rows_per_chunk = chunk_limit_bytes // row_bytes
+    header = {"schema": "minimax-sp-layer-sha256-v1", "dtype": str(tensor.dtype),
+              "shape": [global_stop - global_start, width], "global_start": global_start,
+              "global_stop": global_stop, "byte_order": "little", "order": "C"}
+    digest = hashlib.sha256()
+    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n")
+    copied_bytes = chunks = 0
+    for start in range(global_start - tensor_global_start, global_stop - tensor_global_start, rows_per_chunk):
+        stop = min(start + rows_per_chunk, global_stop - tensor_global_start)
+        chunk = tensor[start:stop].detach().to(device="cpu", non_blocking=False, copy=True,
+                                               memory_format=torch.contiguous_format)
+        # View the original bits before NumPy; NumPy need not understand BF16.
+        array = chunk.view(torch.uint8).numpy()
+        view = memoryview(array).cast("B")
+        try:
+            expected_bytes = (stop - start) * row_bytes
+            if view.nbytes != expected_bytes or view.nbytes > chunk_limit_bytes:
+                raise RuntimeError("layer_hash_cpu_chunk_size_invalid")
+            digest.update(view)
+            copied_bytes += view.nbytes
+            chunks += 1
+        finally:
+            view.release()
+            del view, array, chunk
+    if copied_bytes != (global_stop - global_start) * row_bytes:
+        raise RuntimeError("layer_hash_byte_count_invalid")
+    return {**header, "tensor_bytes": copied_bytes, "chunk_limit_bytes": chunk_limit_bytes,
+            "chunks": chunks, "sha256": digest.hexdigest()}
 
 
 def stored_head_metadata(final_layer):
@@ -89,11 +135,11 @@ def stored_head_metadata(final_layer):
 class Block0Trace:
     """Diagnostic CPU samples only; hooks never change a model result.
 
-    Block0 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
+    Block36 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
     before native in-place RoPE/residual updates can change those rows. The
     native oracle samples the union of both ranks' rows. No tensor is logged.
     """
-    def __init__(self, dit, *, rank, start, stop, rows=None):
+    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None):
         self.dit, self.rank, self.start, self.stop = dit, rank, start, stop
         count = stop - start
         self.rows = (sorted({start + i * (count - 1) // 6 for i in range(7)})
@@ -101,6 +147,8 @@ class Block0Trace:
         self.entries, self.errors, self.handles = {}, [], []
         self.head_metadata = None
         self.head_errors = []
+        self.hash_windows = list(hash_windows) if hash_windows is not None else [(start, stop)]
+        self.full_hashes, self.hash_errors = {}, []
         self.entered = False
 
     def _capture(self, point, tensor):
@@ -123,6 +171,12 @@ class Block0Trace:
                 "amax": max(abs(minimum.item()), abs(maximum.item())),
                 "finite": bool(torch.isfinite(minimum)) and bool(torch.isfinite(maximum)),
             }
+            if point.startswith("block") and point.endswith(".post"):
+                try:
+                    self.full_hashes[point] = [streamed_tensor_sha256(tensor, tensor_global_start=self.start,
+                        global_start=start, global_stop=stop) for start, stop in self.hash_windows]
+                except Exception as exc:
+                    self.hash_errors.append(type(exc).__name__)
         except Exception as exc:
             self.errors.append(type(exc).__name__)
 
@@ -133,7 +187,7 @@ class Block0Trace:
         try:
             if len(self.dit.blocks) != 50:
                 raise RuntimeError("layer_trace_requires_50_blocks")
-            block = self.dit.blocks[0]
+            block = self.dit.blocks[TRACE_PROJECTION_BLOCK]
             for name, module in (("attn.qkv_proj", block.attn.qkv_proj),
                                  ("attn.out_proj", block.attn.out_proj),
                                  ("mlp.fc1", block.mlp.fc1), ("mlp.fc2", block.mlp.fc2)):
@@ -170,7 +224,8 @@ class Block0Trace:
         return {"rank": self.rank, "start": self.start, "stop": self.stop,
                 "rows": list(self.rows), "errors": list(self.errors),
                 "entries": self.entries, "head_metadata": self.head_metadata,
-                "head_errors": list(self.head_errors)}
+                "head_errors": list(self.head_errors), "full_hashes": self.full_hashes,
+                "hash_errors": list(self.hash_errors)}
 
     def capture_head_metadata(self, final_layer):
         try:
@@ -225,13 +280,62 @@ def block0_trace_summary(packets, native):
             sampled = actual["samples"].float()
             delta = (sampled - selected).abs().max().item()
             denominator = max(selected.abs().max().item(), 1e-12)
-            result.append({"rank": packet["rank"], "point": point,
+            result.append({"rank": packet["rank"], "point": point, "projection_block": TRACE_PROJECTION_BLOCK,
                            "shape": actual["shape"], "dtype": actual["dtype"],
                            "sampled_rows": len(packet["rows"]), "global_rows": actual["rows"],
                            "finite": actual["finite"] and expected["finite"],
                            "max_abs": delta, "relative": delta / denominator,
                            "sp_local_amax": actual["amax"], "sp_global_amax": global_amax,
                            "native_global_amax": expected["amax"]})
+    return result
+
+
+def layer_hash_summary(packets, native):
+    """Compare each SP window to the same native window, never concatenate digests."""
+    _, total = block0_trace_rows(packets)
+    points = {f"block{index}.post" for index in range(50)}
+    for packet in [*packets, native]:
+        if packet.get("hash_errors") or set(packet.get("full_hashes", {})) != points:
+            raise RuntimeError("layer_hash_packet_incomplete")
+    if native.get("start") != 0 or native.get("stop") != total:
+        raise RuntimeError("layer_hash_native_extent_invalid")
+    result = []
+    keys = {"schema", "dtype", "shape", "global_start", "global_stop", "byte_order", "order",
+            "tensor_bytes", "chunk_limit_bytes", "chunks", "sha256"}
+    for index in range(50):
+        point = f"block{index}.post"
+        expected = native["full_hashes"][point]
+        if not isinstance(expected, list) or len(expected) != 2:
+            raise RuntimeError("layer_hash_native_windows_invalid")
+        for rank, packet in enumerate(packets):
+            actual = packet["full_hashes"][point]
+            if not isinstance(actual, list) or len(actual) != 1:
+                raise RuntimeError("layer_hash_sp_windows_invalid")
+            actual, reference = actual[0], expected[rank]
+            for value in (actual, reference):
+                item_size = {"torch.bfloat16": 2, "torch.float16": 2, "torch.float32": 4,
+                             "torch.float64": 8}.get(value.get("dtype"))
+                if (set(value) != keys or value["schema"] != "minimax-sp-layer-sha256-v1"
+                        or value["global_start"] != packet["start"] or value["global_stop"] != packet["stop"]
+                        or value["shape"] != [packet["stop"] - packet["start"], native["entries"][point]["shape"][1]]
+                        or value["dtype"] != native["entries"][point]["dtype"]
+                        or value["byte_order"] != "little" or value["order"] != "C"
+                        or value["chunk_limit_bytes"] != TRACE_HASH_CHUNK_BYTES
+                        or type(value["tensor_bytes"]) is not int or value["tensor_bytes"] <= 0
+                        or item_size is None or value["tensor_bytes"] != value["shape"][0] * value["shape"][1] * item_size
+                        or type(value["chunks"]) is not int or value["chunks"] <= 0
+                        or not isinstance(value["sha256"], str) or len(value["sha256"]) != 64
+                        or any(c not in "0123456789abcdef" for c in value["sha256"])):
+                    raise RuntimeError("layer_hash_fields_invalid")
+                rows_per_chunk = TRACE_HASH_CHUNK_BYTES // (value["shape"][1] * item_size)
+                if rows_per_chunk < 1 or value["chunks"] != (value["shape"][0] + rows_per_chunk - 1) // rows_per_chunk:
+                    raise RuntimeError("layer_hash_chunk_count_invalid")
+            if any(actual[key] != reference[key] for key in keys - {"sha256"}):
+                raise RuntimeError("layer_hash_window_metadata_mismatch")
+            result.append({"schema_version": 1, "block": index, "rank": rank,
+                           **{key: actual[key] for key in keys - {"sha256", "schema"}},
+                           "sp_sha256": actual["sha256"], "native_sha256": reference["sha256"],
+                           "match": actual["sha256"] == reference["sha256"]})
     return result
 
 

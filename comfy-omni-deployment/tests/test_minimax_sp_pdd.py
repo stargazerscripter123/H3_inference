@@ -23,10 +23,26 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+FULLHASH_REVERSE_EDITS = {'sp_forward.py': [(24, 26, 'import hashlib\nimport json\n', ''), (27, 28, 'import sys\n', ''), (54, 56, 'TRACE_PROJECTION_BLOCK = 36\nTRACE_HASH_CHUNK_BYTES = 16 * 1024 * 1024\n', ''), (63, 104, '\n\ndef streamed_tensor_sha256(tensor, *, tensor_global_start, global_start, global_stop,\n                          chunk_limit_bytes=TRACE_HASH_CHUNK_BYTES):\n    """Hash original scalar bits in logical C order, one bounded CPU copy at a time."""\n    if (sys.byteorder != "little" or tensor.ndim != 2\n            or type(chunk_limit_bytes) is not int or not 0 < chunk_limit_bytes <= TRACE_HASH_CHUNK_BYTES\n            or not tensor_global_start <= global_start < global_stop <= tensor_global_start + tensor.shape[0]):\n        raise RuntimeError("layer_hash_window_or_byte_order_invalid")\n    width = tensor.shape[1]\n    row_bytes = width * tensor.element_size()\n    if row_bytes <= 0 or row_bytes > chunk_limit_bytes:\n        raise RuntimeError("layer_hash_row_exceeds_chunk_limit")\n    rows_per_chunk = chunk_limit_bytes // row_bytes\n    header = {"schema": "minimax-sp-layer-sha256-v1", "dtype": str(tensor.dtype),\n              "shape": [global_stop - global_start, width], "global_start": global_start,\n              "global_stop": global_stop, "byte_order": "little", "order": "C"}\n    digest = hashlib.sha256()\n    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\\n")\n    copied_bytes = chunks = 0\n    for start in range(global_start - tensor_global_start, global_stop - tensor_global_start, rows_per_chunk):\n        stop = min(start + rows_per_chunk, global_stop - tensor_global_start)\n        chunk = tensor[start:stop].detach().to(device="cpu", non_blocking=False, copy=True,\n                                               memory_format=torch.contiguous_format)\n        # View the original bits before NumPy; NumPy need not understand BF16.\n        array = chunk.view(torch.uint8).numpy()\n        view = memoryview(array).cast("B")\n        try:\n            expected_bytes = (stop - start) * row_bytes\n            if view.nbytes != expected_bytes or view.nbytes > chunk_limit_bytes:\n                raise RuntimeError("layer_hash_cpu_chunk_size_invalid")\n            digest.update(view)\n            copied_bytes += view.nbytes\n            chunks += 1\n        finally:\n            view.release()\n            del view, array, chunk\n    if copied_bytes != (global_stop - global_start) * row_bytes:\n        raise RuntimeError("layer_hash_byte_count_invalid")\n    return {**header, "tensor_bytes": copied_bytes, "chunk_limit_bytes": chunk_limit_bytes,\n            "chunks": chunks, "sha256": digest.hexdigest()}\n', ''), (137, 138, '    Block36 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,\n', '    Block0 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,\n'), (141, 142, '    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None):\n', '    def __init__(self, dit, *, rank, start, stop, rows=None):\n'), (149, 151, '        self.hash_windows = list(hash_windows) if hash_windows is not None else [(start, stop)]\n        self.full_hashes, self.hash_errors = {}, []\n', ''), (173, 179, '            if point.startswith("block") and point.endswith(".post"):\n                try:\n                    self.full_hashes[point] = [streamed_tensor_sha256(tensor, tensor_global_start=self.start,\n                        global_start=start, global_stop=stop) for start, stop in self.hash_windows]\n                except Exception as exc:\n                    self.hash_errors.append(type(exc).__name__)\n', ''), (189, 190, '            block = self.dit.blocks[TRACE_PROJECTION_BLOCK]\n', '            block = self.dit.blocks[0]\n'), (226, 228, '                "head_errors": list(self.head_errors), "full_hashes": self.full_hashes,\n                "hash_errors": list(self.hash_errors)}\n', '                "head_errors": list(self.head_errors)}\n'), (282, 283, '            result.append({"rank": packet["rank"], "point": point, "projection_block": TRACE_PROJECTION_BLOCK,\n', '            result.append({"rank": packet["rank"], "point": point,\n'), (289, 338, '    return result\n\n\ndef layer_hash_summary(packets, native):\n    """Compare each SP window to the same native window, never concatenate digests."""\n    _, total = block0_trace_rows(packets)\n    points = {f"block{index}.post" for index in range(50)}\n    for packet in [*packets, native]:\n        if packet.get("hash_errors") or set(packet.get("full_hashes", {})) != points:\n            raise RuntimeError("layer_hash_packet_incomplete")\n    if native.get("start") != 0 or native.get("stop") != total:\n        raise RuntimeError("layer_hash_native_extent_invalid")\n    result = []\n    keys = {"schema", "dtype", "shape", "global_start", "global_stop", "byte_order", "order",\n            "tensor_bytes", "chunk_limit_bytes", "chunks", "sha256"}\n    for index in range(50):\n        point = f"block{index}.post"\n        expected = native["full_hashes"][point]\n        if not isinstance(expected, list) or len(expected) != 2:\n            raise RuntimeError("layer_hash_native_windows_invalid")\n        for rank, packet in enumerate(packets):\n            actual = packet["full_hashes"][point]\n            if not isinstance(actual, list) or len(actual) != 1:\n                raise RuntimeError("layer_hash_sp_windows_invalid")\n            actual, reference = actual[0], expected[rank]\n            for value in (actual, reference):\n                item_size = {"torch.bfloat16": 2, "torch.float16": 2, "torch.float32": 4,\n                             "torch.float64": 8}.get(value.get("dtype"))\n                if (set(value) != keys or value["schema"] != "minimax-sp-layer-sha256-v1"\n                        or value["global_start"] != packet["start"] or value["global_stop"] != packet["stop"]\n                        or value["shape"] != [packet["stop"] - packet["start"], native["entries"][point]["shape"][1]]\n                        or value["dtype"] != native["entries"][point]["dtype"]\n                        or value["byte_order"] != "little" or value["order"] != "C"\n                        or value["chunk_limit_bytes"] != TRACE_HASH_CHUNK_BYTES\n                        or type(value["tensor_bytes"]) is not int or value["tensor_bytes"] <= 0\n                        or item_size is None or value["tensor_bytes"] != value["shape"][0] * value["shape"][1] * item_size\n                        or type(value["chunks"]) is not int or value["chunks"] <= 0\n                        or not isinstance(value["sha256"], str) or len(value["sha256"]) != 64\n                        or any(c not in "0123456789abcdef" for c in value["sha256"])):\n                    raise RuntimeError("layer_hash_fields_invalid")\n                rows_per_chunk = TRACE_HASH_CHUNK_BYTES // (value["shape"][1] * item_size)\n                if rows_per_chunk < 1 or value["chunks"] != (value["shape"][0] + rows_per_chunk - 1) // rows_per_chunk:\n                    raise RuntimeError("layer_hash_chunk_count_invalid")\n            if any(actual[key] != reference[key] for key in keys - {"sha256"}):\n                raise RuntimeError("layer_hash_window_metadata_mismatch")\n            result.append({"schema_version": 1, "block": index, "rank": rank,\n                           **{key: actual[key] for key in keys - {"sha256", "schema"}},\n                           "sp_sha256": actual["sha256"], "native_sha256": reference["sha256"],\n                           "match": actual["sha256"] == reference["sha256"]})\n', '')], 'sp_group.py': [(362, 364, '                        native_trace = spf.Block0Trace(dit, rank=-1, start=0, stop=total, rows=rows,\n                            hash_windows=[(packet["start"], packet["stop"]) for packet in packets])\n', '                        native_trace = spf.Block0Trace(dit, rank=-1, start=0, stop=total, rows=rows)\n'), (377, 380, '                        hash_summaries = spf.layer_hash_summary(packets, native_trace.packet())\n                        for row in hash_summaries:\n                            logging.info("[minimax_sp][layer_hash] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
+FULLHASH_PRIOR_SHA = {'sp_forward.py': 'e4bd4a8fb0385639946313ad6f7eb3fe4a79825e90ab715aa37d63186c2aa68c', 'sp_group.py': 'e46b6b0062cc376041a4faa3970b1374899f00846c3502651c384fa8f60010df'}
+
+def reverse_fullhash_trace(source, name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(FULLHASH_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('fullhash reviewed block digest/lines changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=FULLHASH_PRIOR_SHA[name]:
+        raise AssertionError('fullhash reviewed block digest differs from deployed layer source')
+    return source
+
+
 LAYER_TRACE_REVERSE_EDITS = {'sp_forward.py': [(53, 86, '    for suffix in (".pre", ".post")) + tuple(f"block{index}.post" for index in range(50))\nHEAD_METADATA_DTYPES = ("torch.float32", "torch.bfloat16", "torch.float16",\n                        "torch.float8_e4m3fn", "torch.float8_e5m2")\nHEAD_METADATA_QUANT = ("nvfp4", "fp8_e4m3fn", "fp8_e5m2", "mxfp8")\nHEAD_METADATA_LAYOUTS = ("TensorCoreNVFP4Layout", "TensorCoreFP8Layout", "TensorCoreMXFP8Layout")\n\n\ndef stored_head_metadata(final_layer):\n    """Read attributes only: never materialize/cast/hash a lazy head weight."""\n    def known(value, allowed):\n        return value if value in allowed else "other"\n    result = []\n    for name in ("video_out", "audio_out"):\n        head = getattr(final_layer, name)\n        weight, bias = head.weight, head.bias\n        quant, layout = getattr(head, "quant_format", None), getattr(head, "layout_type", None)\n        result.append({\n            "head": name,\n            "weight_type": known(type(weight).__name__, ("Parameter", "Tensor", "QuantizedTensor")),\n            "weight_dtype": known(str(weight.dtype), HEAD_METADATA_DTYPES),\n            "weight_shape": list(weight.shape),\n            "weight_device_type": known(weight.device.type, ("cpu", "cuda", "meta")),\n            "weight_is_meta": bool(weight.is_meta),\n            "bias_dtype": None if bias is None else known(str(bias.dtype), HEAD_METADATA_DTYPES),\n            "bias_shape": None if bias is None else list(bias.shape),\n            "quant_format": None if quant is None else known(quant, HEAD_METADATA_QUANT),\n            "layout_type": None if layout is None else known(layout, HEAD_METADATA_LAYOUTS),\n            "full_precision_mm": bool(getattr(head, "_full_precision_mm", False)),\n            "has_v": hasattr(head, "_v"), "has_prefetch": hasattr(head, "_prefetch"),\n            "weight_function_count": len(getattr(head, "weight_function", ())),\n            "bias_function_count": len(getattr(head, "bias_function", ())),\n        })\n    return result\n', '    for suffix in (".pre", ".post")) + ("block0.post",)\n'), (91, 92, '    Block0 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,\n', '    Each point copies seven global rows (all features) per SP rank immediately,\n'), (101, 103, '        self.head_metadata = None\n        self.head_errors = []\n', ''), (133, 135, '            if len(self.dit.blocks) != 50:\n                raise RuntimeError("layer_trace_requires_50_blocks")\n', ''), (145, 151, '            for index, block in enumerate(self.dit.blocks):\n                self.handles.append(block.register_forward_hook(\n                    lambda _module, _inputs, output, point=f"block{index}.post": self._capture(point, output)))\n            if self.rank == -1:\n                self.handles.append(self.dit.final_layer.register_forward_pre_hook(\n                    lambda module, _inputs: self.capture_head_metadata(module)))\n', '            self.handles.append(block.register_forward_hook(\n                lambda _module, _inputs, output: self._capture("block0.post", output)))\n'), (171, 181, '                "entries": self.entries, "head_metadata": self.head_metadata,\n                "head_errors": list(self.head_errors)}\n\n    def capture_head_metadata(self, final_layer):\n        try:\n            if self.head_metadata is not None:\n                raise RuntimeError("head_metadata_duplicate_capture")\n            self.head_metadata = stored_head_metadata(final_layer)\n        except Exception as exc:\n            self.head_errors.append(type(exc).__name__)\n', '                "entries": self.entries}\n'), (234, 261, '    return result\n\n\ndef head_metadata_summary(packets, native):\n    """Six closed-schema records; these are not executed/cast weight values."""\n    result = []\n    expected_keys = {"head", "weight_type", "weight_dtype", "weight_shape", "weight_device_type",\n                     "weight_is_meta", "bias_dtype", "bias_shape", "quant_format", "layout_type",\n                     "full_precision_mm", "has_v", "has_prefetch", "weight_function_count", "bias_function_count"}\n    for packet, phase, rank in [(packets[0], "sp2", 0), (packets[1], "sp2", 1), (native, "native", -1)]:\n        heads = packet.get("head_metadata")\n        if packet.get("rank") != rank or packet.get("head_errors") or not isinstance(heads, list) or len(heads) != 2:\n            raise RuntimeError("head_metadata_packet_invalid")\n        for head, name, width in zip(heads, ("video_out", "audio_out"), (3072, 1024)):\n            if (not isinstance(head, dict) or set(head) != expected_keys or head["head"] != name\n                    or head["weight_shape"] != [width, 5376] or head["bias_shape"] != [width]\n                    or head["weight_type"] not in ("Parameter", "Tensor", "QuantizedTensor", "other")\n                    or head["weight_dtype"] not in (*HEAD_METADATA_DTYPES, "other")\n                    or head["bias_dtype"] not in (*HEAD_METADATA_DTYPES, "other")\n                    or head["weight_device_type"] not in ("cpu", "cuda", "meta", "other")\n                    or head["quant_format"] not in (None, *HEAD_METADATA_QUANT, "other")\n                    or head["layout_type"] not in (None, *HEAD_METADATA_LAYOUTS, "other")\n                    or any(type(head[key]) is not bool for key in ("weight_is_meta", "full_precision_mm", "has_v", "has_prefetch"))\n                    or any(type(head[key]) is not int or head[key] < 0 for key in ("weight_function_count", "bias_function_count"))):\n                raise RuntimeError("head_metadata_fields_invalid")\n            result.append({"schema_version": 1, "phase": phase, "rank": rank,\n                           "scope": "stored_runtime_metadata", "execution_weight_verified": False, **head})\n', ''), (807, 809, '        if trace is not None:\n            trace.capture_head_metadata(dit.final_layer)\n', '')], 'sp_group.py': [(376, 379, '                        head_summaries = spf.head_metadata_summary(packets, native_trace.packet())\n                        for row in head_summaries:\n                            logging.info("[minimax_sp][head_metadata] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
 LAYER_TRACE_PRIOR_SHA = {'sp_forward.py': '191008ba795c38ec50603941a3a3fd64d967e27de0659fecc558aee11e2dcdb0', 'sp_group.py': 'e524cdc22d6e4d9353044a113bc34b433eb0a885a4df6b78e8500ad0dfc70d7f'}
 
 def reverse_layer_trace(source, name='sp_forward.py'):
+    source=reverse_fullhash_trace(source,name)
     lines=source.splitlines(keepends=True)
     for lo,hi,after,before in reversed(LAYER_TRACE_REVERSE_EDITS[name]):
         if ''.join(lines[lo:hi])!=after:
@@ -384,6 +400,9 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             return mirror
         if (rank, world, group) != (0, 2, 'owned-tensor-pg'):
             raise AssertionError('original world2 dispatch changed')
+        if options.get('_minimax_sp_block0_trace_request'):
+            options['_minimax_sp_block0_trace_result'] = [
+                {'start':0,'stop':1}, {'start':1,'stop':2}]
         return sp2
 
     class Trace:
@@ -408,7 +427,8 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             BLOCK0_TRACE_REQUEST='_minimax_sp_block0_trace_request', BLOCK0_TRACE_RESULT='_minimax_sp_block0_trace_result',
             block0_trace_rows=Mock(return_value=([0,1],2)),
             Block0Trace=Trace,
-            block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[])),
+            block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[]),
+            layer_hash_summary=Mock(return_value=[])),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -775,10 +795,18 @@ class _B0TTensor:
     def detach(self):
         return self
 
-    def to(self, *, device):
+    def to(self, *, device, **kwargs):
         if device != "cpu":
             raise AssertionError("test only permits CPU snapshots")
-        return self
+        return _B0TTensor(self.value.copy(order="C")) if kwargs.get("copy") else self
+
+    def element_size(self):
+        return self.value.dtype.itemsize
+
+    def view(self, dtype):
+        if dtype != "uint8":
+            raise AssertionError("hash must view original bits as uint8")
+        return _B0TNamespace(numpy=lambda: self.value.view(_b0t_np.uint8))
 
     def clone(self):
         return _B0TTensor(self.value.copy())
@@ -849,24 +877,26 @@ def _b0t_model():
                                device=_B0TNamespace(type="meta"),is_meta=True)
         bias = _B0TNamespace(dtype="torch.float32",shape=(width,))
         setattr(final,name,_B0TNamespace(weight=weight,bias=bias))
-    return _B0TNamespace(blocks=[block] + exits,final_layer=final), modules + [block] + exits + [final]
+    return _B0TNamespace(blocks=exits[:36] + [block] + exits[36:],final_layer=final), modules + [block] + exits + [final]
 
 
 def _b0t_load():
     parsed = _b0t_ast.parse(_b0t_source_path().read_text())
     symbols = {"Block0Trace", "block0_trace_rows", "block0_trace_summary", "sp_block",
-               "stored_head_metadata", "head_metadata_summary"}
+               "stored_head_metadata", "head_metadata_summary", "streamed_tensor_sha256", "layer_hash_summary"}
     selected = [node for node in parsed.body if
                 isinstance(node, (_b0t_ast.FunctionDef, _b0t_ast.ClassDef))
                 and node.name in symbols or
                 isinstance(node, _b0t_ast.Assign) and any(
                     isinstance(target, _b0t_ast.Name)
-                    and (target.id == "BLOCK0_TRACE_POINTS" or target.id.startswith("HEAD_METADATA_")) for target in node.targets)]
+                    and (target.id in ("BLOCK0_TRACE_POINTS", "TRACE_PROJECTION_BLOCK", "TRACE_HASH_CHUNK_BYTES")
+                         or target.id.startswith("HEAD_METADATA_")) for target in node.targets)]
     namespace = {"torch": _B0TNamespace(
-        Tensor=_B0TTensor,
+        Tensor=_B0TTensor, uint8="uint8", contiguous_format="contiguous",
         aminmax=lambda tensor: (_B0TTensor(tensor.value.min()),
                                 _B0TTensor(tensor.value.max())),
         isfinite=lambda tensor: _B0TTensor(_b0t_np.isfinite(tensor.value))),
+        "hashlib":hashlib,"json":json,"sys":__import__('sys'),
         "region": lambda _name: _b0t_nullcontext(),
         "sp_attention": lambda *args, **kwargs: None}
     exec(compile(_b0t_ast.Module(body=selected, type_ignores=[]),
@@ -878,11 +908,11 @@ class Block0TraceMetadataTests(_b0t_unittest.TestCase):
     def setUp(self):
         self.api = _b0t_load()
 
-    def _packet(self, rank, start, stop, rows=None):
+    def _packet(self, rank, start, stop, rows=None, hash_windows=None):
         model, modules = _b0t_model()
         tensor = _B0TTensor(_b0t_np.arange(start * 3, stop * 3).reshape(-1, 3))
         with self.api.Block0Trace(model, rank=rank, start=start, stop=stop,
-                                  rows=rows) as trace:
+                                  rows=rows, hash_windows=hash_windows) as trace:
             # Exercise actual sp_block AST, including block.__call__ hooks.
             for block in model.blocks:
                 tensor = self.api.sp_block(block, tensor, None, None, None,
@@ -897,7 +927,7 @@ class Block0TraceMetadataTests(_b0t_unittest.TestCase):
     def _packets(self):
         packets = [self._packet(0, 0, 10), self._packet(1, 10, 19)]
         rows, total = self.api.block0_trace_rows(packets)
-        return packets, self._packet(-1, 0, total, rows)
+        return packets, self._packet(-1, 0, total, rows, [(p['start'],p['stop']) for p in packets])
 
     def test_real_sp_block_hook_route_and_global_row_alignment(self):
         packets, native = self._packets()
@@ -1039,6 +1069,162 @@ class Block0TraceGroupGateTests(unittest.TestCase):
         f.namespace['spf'].block0_trace_summary.assert_not_called()
         self.assertEqual(f.args[5],{})
 
+
+
+class _HashRawTensor:
+    """CPU fixture preserving FP16/BF16 raw storage; no tensor math conversion."""
+    def __init__(self, values, dtype, tracker=None, copied=False):
+        self.values = np.asarray(values)
+        self.dtype = dtype
+        self.tracker = tracker if tracker is not None else {"copies": [], "alive": 0, "peak": 0}
+        self.copied = copied
+        if copied:
+            self.tracker["copies"].append(self.values.nbytes)
+            self.tracker["alive"] += 1
+            self.tracker["peak"] = max(self.tracker["peak"], self.tracker["alive"])
+
+    def __del__(self):
+        if getattr(self, "copied", False):
+            self.tracker["alive"] -= 1
+
+    @property
+    def shape(self): return self.values.shape
+    @property
+    def ndim(self): return self.values.ndim
+    def element_size(self): return self.values.dtype.itemsize
+    def __getitem__(self, key): return _HashRawTensor(self.values[key], self.dtype, self.tracker)
+    def detach(self): return self
+
+    def to(self, **kwargs):
+        if kwargs != {"device":"cpu", "non_blocking":False, "copy":True, "memory_format":"contiguous"}:
+            raise AssertionError("hash copy must be explicit synchronous C-order CPU copy")
+        return _HashRawTensor(self.values.copy(order="C"), self.dtype, self.tracker, copied=True)
+
+    def view(self, dtype):
+        if dtype != "uint8":
+            raise AssertionError("original scalar bits must be viewed as bytes before NumPy")
+        return SimpleNamespace(numpy=lambda:self.values.view(np.uint8))
+
+
+class FullLayerHashTests(unittest.TestCase):
+    def setUp(self): self.api = _b0t_load()
+
+    def test_window_header_and_digest_are_independent_of_rank_phase_and_chunk_size(self):
+        values = np.arange(105,dtype=np.float32).reshape(21,5)
+        source = _HashRawTensor(values,"torch.float32")
+        small = self.api.streamed_tensor_sha256(source,tensor_global_start=0,
+                    global_start=3,global_stop=17,chunk_limit_bytes=40)
+        large = self.api.streamed_tensor_sha256(source,tensor_global_start=0,
+                    global_start=3,global_stop=17,chunk_limit_bytes=100)
+        shard = self.api.streamed_tensor_sha256(_HashRawTensor(values[3:17],"torch.float32"),
+                    tensor_global_start=3,global_start=3,global_stop=17,chunk_limit_bytes=40)
+        self.assertEqual(small["sha256"],large["sha256"])
+        self.assertEqual(small,shard)
+        self.assertEqual(small["shape"],[14,5])
+        self.assertEqual((small["chunks"],large["chunks"]),(7,3))
+        self.assertEqual(small["tensor_bytes"],280)
+        self.assertLessEqual(max(source.tracker["copies"]),100)
+        self.assertEqual(source.tracker["peak"],1)
+        self.assertEqual(source.tracker["alive"],0)
+
+    def test_noncontiguous_logical_rows_match_contiguous_without_full_copy(self):
+        view = np.arange(96,dtype=np.float32).reshape(12,8)[::2,::2]
+        self.assertFalse(view.flags.c_contiguous)
+        source = _HashRawTensor(view,"torch.float32")
+        kwargs = dict(tensor_global_start=7,global_start=7,global_stop=13,chunk_limit_bytes=32)
+        got = self.api.streamed_tensor_sha256(source,**kwargs)
+        expected = self.api.streamed_tensor_sha256(_HashRawTensor(view.copy(),"torch.float32"),**kwargs)
+        self.assertEqual(got,expected)
+        self.assertEqual(source.tracker["copies"],[32,32,32])
+        self.assertEqual(source.tracker["peak"],1)
+
+    def test_float16_and_bfloat16_original_bits_match_manual_canonical_digest(self):
+        bits=np.array([[0,32768,1,32767],[16256,65472,12345,45678]],dtype=np.uint16)
+        for dtype,values in (("torch.bfloat16",bits),("torch.float16",bits.view(np.float16))):
+            with self.subTest(dtype=dtype):
+                got=self.api.streamed_tensor_sha256(_HashRawTensor(values,dtype),
+                    tensor_global_start=9,global_start=9,global_stop=11,chunk_limit_bytes=8)
+                header={key:got[key] for key in ("schema","dtype","shape","global_start","global_stop","byte_order","order")}
+                h=hashlib.sha256(json.dumps(header,sort_keys=True,separators=(",",":")).encode("ascii")+b"\n")
+                h.update(memoryview(bits.view(np.uint8)).cast("B"))
+                self.assertEqual(got["sha256"],h.hexdigest())
+                self.assertEqual((got["tensor_bytes"],got["chunks"]),(16,2))
+
+    def test_change_outside_sample_rows_is_detected_by_full_hash_and_snapshot_is_immediate(self):
+        model,_=_b0t_model()
+        source=_B0TTensor(np.arange(30,dtype=np.float32).reshape(10,3))
+        altered=_B0TTensor(source.value.copy())
+        altered.value.view(np.uint32)[2,0]^=1
+        a=self.api.Block0Trace(model,rank=0,start=0,stop=10)
+        b=self.api.Block0Trace(model,rank=0,start=0,stop=10)
+        a._capture("block0.post",source); b._capture("block0.post",altered)
+        self.assertNotIn(2,a.rows)
+        np.testing.assert_array_equal(a.entries["block0.post"]["samples"].value,
+                                      b.entries["block0.post"]["samples"].value)
+        first=a.full_hashes["block0.post"][0]["sha256"]
+        self.assertNotEqual(first,b.full_hashes["block0.post"][0]["sha256"])
+        source.value[:]=-100
+        self.assertEqual(a.full_hashes["block0.post"][0]["sha256"],first)
+
+    def test_hash_summary_has_100_bound_rows_and_mismatch_is_observation(self):
+        fixtures=Block0TraceMetadataTests();fixtures.setUp()
+        packets,native=fixtures._packets()
+        rows=self.api.layer_hash_summary(packets,native)
+        self.assertEqual(len(rows),100)
+        self.assertTrue(all(row["match"] for row in rows))
+        self.assertEqual([(row["block"],row["rank"]) for row in rows],
+                         [(block,rank) for block in range(50) for rank in range(2)])
+        numeric=self.api.block0_trace_summary(packets,native)
+        self.assertTrue(all(row["projection_block"]==36 for row in numeric))
+        packets[1]["full_hashes"]["block2.post"][0]["sha256"]="0"*64
+        rows=self.api.layer_hash_summary(packets,native)
+        self.assertEqual([(r["block"],r["rank"]) for r in rows if not r["match"]],[(2,1)])
+        self.assertNotIn("samples",json.dumps(rows,allow_nan=False))
+
+    def test_missing_hash_wrong_window_dtype_shape_and_counts_fail_closed(self):
+        fixtures=Block0TraceMetadataTests();fixtures.setUp()
+        mutations=[lambda p:p[0]["full_hashes"].pop("block49.post"),
+                   lambda p:p[1]["full_hashes"]["block0.post"][0].update(global_start=0),
+                   lambda p:p[0]["full_hashes"]["block0.post"][0].update(dtype="torch.float16"),
+                   lambda p:p[0]["full_hashes"]["block0.post"][0].update(shape=[9,3]),
+                   lambda p:p[0]["full_hashes"]["block0.post"][0].update(chunks=2),
+                   lambda p:p[0]["full_hashes"]["block0.post"][0].update(tensor_bytes=1),
+                   lambda p:p[0].update(hash_errors=["RuntimeError"])]
+        for index,mutation in enumerate(mutations):
+            with self.subTest(index=index):
+                packets,native=fixtures._packets();mutation(packets)
+                with self.assertRaises(RuntimeError):self.api.layer_hash_summary(packets,native)
+
+    def test_hash_capture_failure_retains_error_code_cleans_hooks_and_cannot_pass_gate(self):
+        model,modules=_b0t_model()
+        with self.api.Block0Trace(model,rank=0,start=0,stop=10,hash_windows=[(0,11)]) as trace:
+            tensor=_B0TTensor(np.ones((10,3)))
+            for block in model.blocks:tensor=block(tensor)
+        self.assertEqual(trace.errors,[])
+        self.assertEqual(len(trace.hash_errors),50)
+        self.assertEqual(set(trace.hash_errors),{"RuntimeError"})
+        self.assertTrue(all(not m.before and not m.after for m in modules))
+        f=parity_fixture(world2_good=True)
+        f.namespace["spf"].layer_hash_summary.side_effect=RuntimeError("hash_fixture")
+        with self.assertRaisesRegex(RuntimeError,"diagnostic evidence incomplete"):f.forward(*f.args)
+        f.owner.destroy.assert_called_once()
+        self.assertTrue(f.owner.verify_pending)
+        self.assertEqual(f.args[5],{})
+
+    def test_oversize_row_invalid_cap_and_foreign_byte_order_are_rejected(self):
+        source=_HashRawTensor(np.zeros((2,5),dtype=np.float32),"torch.float32")
+        for cap in (0,True,19,16*1024*1024+1):
+            with self.subTest(cap=cap),self.assertRaises(RuntimeError):
+                self.api.streamed_tensor_sha256(source,tensor_global_start=0,
+                    global_start=0,global_stop=2,chunk_limit_bytes=cap)
+        namespace=self.api.streamed_tensor_sha256.__globals__
+        original=namespace["sys"]
+        try:
+            namespace["sys"]=SimpleNamespace(byteorder="big")
+            with self.assertRaisesRegex(RuntimeError,"byte_order_invalid"):
+                self.api.streamed_tensor_sha256(source,tensor_global_start=0,global_start=0,global_stop=2)
+        finally:namespace["sys"]=original
+        self.assertEqual(source.tracker["copies"],[])
 
 if __name__ == "__main__":
     unittest.main()

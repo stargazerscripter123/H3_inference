@@ -120,3 +120,5 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 生命周期测试使用模拟进程、信号和HTTP接口，不导入Torch或运行GPU任务；业务客户端测试使用模拟协议、事件与媒体metadata。这些测试的证据范围仍是CPU模拟；本页的12/12 GPU运行结果来自独立业务实测，不由单元测试推断。
 
 最终PDD头的诊断只记录两rank与native的stored运行时类型、dtype和shape等属性，不读取/输出权重值、不额外物化权重。其字段相同不证明实际执行权重相同；`execution_weight_verified=false`。
+
+第六次GPU诊断完整取得116组采样及6条存储属性：block 0–35采样均相同，block 36首次出现采样差异，block 39开始全tensor amax不同；最终SP2仍未通过数值门槛。两rank与native输出头所列存储属性相同（weight BF16、bias FP32），不证明实际cast权重逐位相同。下一诊断将投影采样定位到block36，并对全部50层出口按rank窗口分块计算完整字节SHA，查明更早位置是否存在未被采样覆盖的差异。CPU临时块不超过16MiB，不保留/输出激活内容；拷贝及哈希耗时属于诊断，不计入性能。
