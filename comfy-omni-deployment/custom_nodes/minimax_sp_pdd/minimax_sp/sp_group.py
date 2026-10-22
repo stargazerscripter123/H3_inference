@@ -204,6 +204,8 @@ def ordered_tensors(x, timestep, context, transformer_options, payload):
 
 class SPGroup:
     def __init__(self, world, unet_name, weight_dtype, devices, port=0):
+        if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY and os.environ.get("MINIMAX_SP_VERIFY") != "1":
+            raise RuntimeError("MiniMax SP full-M probe requires verification; formal execution is disabled")
         if dist.is_initialized():
             raise RuntimeError("MiniMax SP cannot adopt an existing process group; use a separate ComfyUI process")
         self.world = world
@@ -388,9 +390,12 @@ class SPGroup:
                         for row in replay_summary["statuses"]:
                             logging.info("[minimax_sp][projection_replay_status] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                         for row in replay_summary["actual"]:
-                            logging.info("[minimax_sp][projection_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                            logging.info("[minimax_sp][projection_source_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                         for row in replay_summary["replays"]:
                             logging.info("[minimax_sp][projection_replay] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        full_m_rows = spf.projection_full_m_summary(packets, native_trace.packet())
+                        for row in full_m_rows:
+                            logging.info("[minimax_sp][projection_full_m] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                         if not replay_summary["complete"]:
                             trace_error = "ProjectionReplayIncomplete"
                     except Exception as exc:
@@ -412,6 +417,9 @@ class SPGroup:
                     raise RuntimeError(f"[minimax_sp] {first['label']} differs from native H3: relative={first['relative']}")
                 if trace_error is not None:
                     raise RuntimeError("MiniMax SP block0 diagnostic evidence incomplete")
+                if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY:
+                    logging.info("[minimax_sp][full_m_probe_complete] native_parity_pass=1 formal_eligible=0")
+                    raise RuntimeError("MiniMax SP full-M diagnostic complete; formal execution remains disabled")
                 self.verify_pending = False
             if profile:
                 torch.cuda.synchronize()

@@ -23,6 +23,7 @@ import types
 
 import logging
 import hashlib
+import dataclasses
 import json
 import os
 import sys
@@ -261,14 +262,308 @@ def _replay_compare_outputs(full, shard, *, global_start, global_stop):
             "unequal_elements": unequal, "compared_elements": (global_stop - global_start) * 5376}
 
 
+# BEGIN reviewed verify-only full-M projection probe
+def _full_m_sizes(*, local_rows, full_rows, input_cols, global_start):
+    values = (local_rows, full_rows, input_cols, global_start)
+    if (any(type(n) is not int for n in values) or local_rows <= 0 or full_rows <= 0
+            or input_cols <= 0 or input_cols % 16 or global_start < 0
+            or global_start + local_rows > full_rows):
+        raise RuntimeError("full_m_geometry_invalid")
+    cols = input_cols // 16
+    padded_cols = (cols + 3) // 4 * 4
+    qrows = (full_rows + 15) // 16 * 16
+    srows = (full_rows + 127) // 128 * 128
+    # Conservative bound on simultaneous tile-sized reshape/copy intermediates.
+    scratch = 6 * 128 * padded_cols
+    return {"logical_rows": full_rows, "local_rows": local_rows,
+            "global_start": global_start, "global_stop": global_start + local_rows,
+            "input_cols": input_cols, "logical_scale_cols": cols,
+            "qdata_shape": [qrows, input_cols // 2],
+            "block_scale_shape": [srows, padded_cols],
+            "qdata_bytes": qrows * (input_cols // 2),
+            "block_scale_bytes": srows * padded_cols,
+            "layout_scratch_bound_bytes": scratch}
+
+
+def nvfp4_full_m_budget(*, local_rows, full_rows, input_cols, global_start,
+                       output_cols, workspace_bytes=33554432):
+    """Calculated additional buffers, not an allocator or measured free-memory gate."""
+    if (type(output_cols) is not int or output_cols <= 0
+            or type(workspace_bytes) is not int or workspace_bytes < 0):
+        raise RuntimeError("full_m_budget_invalid")
+    sizes = _full_m_sizes(local_rows=local_rows, full_rows=full_rows,
+                          input_cols=input_cols, global_start=global_start)
+    storage = sizes["qdata_bytes"] + sizes["block_scale_bytes"]
+    full_y = sizes["qdata_shape"][0] * output_cols * 2  # BF16 output; retain padded allocation.
+    crop = local_rows * output_cols * 2  # Clone required before full-Y can be released.
+    return {"schema_version": 1, "kind": "calculated_not_measured", **sizes,
+            "new_packed_storage_bytes": storage,
+            "helper_extra_bound_bytes": storage + sizes["layout_scratch_bound_bytes"],
+            "full_y_bf16_bytes": full_y, "crop_bf16_bytes": crop,
+            "workspace_bytes": workspace_bytes,
+            "conservative_additional_bytes": storage + sizes["layout_scratch_bound_bytes"]
+                + full_y + crop + workspace_bytes,
+            "excludes_existing_inputs_weights_allocator_other_kernels": True,
+            "bf16_full_x_bytes": 0, "measured_peak": False}
+
+
+def _full_m_unblock_tile(tile, padded_cols):
+    a = tile.reshape(-1, 32, 4, 4).transpose(1, 2)
+    b = a.reshape(1, padded_cols // 4, 128, 4)
+    return b.permute(0, 2, 1, 3).reshape(128, padded_cols)
+
+
+def _full_m_block_tile(tile, padded_cols):
+    a = tile.reshape(1, 128, padded_cols // 4, 4).permute(0, 2, 1, 3)
+    return a.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(128, padded_cols)
+
+
+def nvfp4_full_m_zero_pad_storage(qdata, block_scale, scale, *, local_rows,
+                                full_rows, input_cols, global_start,
+                                allocation_limit_bytes):
+    """Return new packed buffers and the exact same scalar scale object.
+
+    Only source logical rows/columns are copied; all other target bytes are zero.
+    Work stays on the input device. No quantization/dequantization is performed.
+    The explicit limit bounds this helper's buffers only, not a following GEMM.
+    Caller must retain W/precision/global scale and separately prove full parity.
+    """
+    sizes = _full_m_sizes(local_rows=local_rows, full_rows=full_rows,
+                          input_cols=input_cols, global_start=global_start)
+    columns = sizes["logical_scale_cols"]
+    padded_cols = sizes["block_scale_shape"][1]
+    bound = sizes["qdata_bytes"] + sizes["block_scale_bytes"] + sizes["layout_scratch_bound_bytes"]
+    if type(allocation_limit_bytes) is not int or allocation_limit_bytes < bound:
+        raise RuntimeError("full_m_allocation_budget_insufficient")
+    if (not all(isinstance(tensor, torch.Tensor) for tensor in (qdata, block_scale, scale))
+            or qdata.dtype != torch.uint8 or block_scale.dtype != torch.float8_e4m3fn
+            or scale.dtype != torch.float32 or scale.numel() != 1
+            or qdata.ndim != 2 or block_scale.ndim != 2
+            or not all(tensor.is_contiguous() for tensor in (qdata, block_scale, scale))
+            or tuple(qdata.shape) != ((local_rows + 15) // 16 * 16, input_cols // 2)
+            or tuple(block_scale.shape) != ((local_rows + 127) // 128 * 128, padded_cols)
+            or not (qdata.device == block_scale.device == scale.device)
+            or any(tensor.requires_grad for tensor in (qdata, block_scale, scale))
+            or not bool(torch.isfinite(scale).all().item())
+            or not bool((scale >= 0).all().item())):
+        raise RuntimeError("full_m_storage_or_scale_invalid")
+    full_qdata = torch.zeros(tuple(sizes["qdata_shape"]), dtype=torch.uint8, device=qdata.device)
+    full_scales = torch.zeros(tuple(sizes["block_scale_shape"]), dtype=torch.uint8, device=qdata.device)
+    full_qdata[global_start:global_start + local_rows].copy_(qdata[:local_rows])
+    source_bytes = block_scale.view(torch.uint8)
+    global_stop = global_start + local_rows
+    for target_start in range((global_start // 128) * 128, global_stop, 128):
+        logical_tile = torch.zeros((128, padded_cols), dtype=torch.uint8, device=qdata.device)
+        overlap_start = max(global_start, target_start)
+        overlap_stop = min(global_stop, target_start + 128)
+        source_start, source_stop = overlap_start - global_start, overlap_stop - global_start
+        for source_tile_start in range((source_start // 128) * 128, source_stop, 128):
+            unblocked = _full_m_unblock_tile(source_bytes[source_tile_start:source_tile_start + 128], padded_cols)
+            first = max(source_start, source_tile_start)
+            last = min(source_stop, source_tile_start + 128)
+            target_first = global_start + first - target_start
+            logical_tile[target_first:target_first + last - first, :columns].copy_(
+                unblocked[first - source_tile_start:last - source_tile_start, :columns])
+            del unblocked
+        blocked = _full_m_block_tile(logical_tile, padded_cols)
+        full_scales[target_start:target_start + 128].copy_(blocked)
+        del blocked, logical_tile
+    return {"qdata": full_qdata, "block_scale": full_scales.view(torch.float8_e4m3fn),
+            "scale": scale, "metadata": {"schema_version": 1, **sizes,
+                "helper_extra_bound_bytes": bound, "scale_object_reused": True,
+                "outside_window_zero": True, "source_padding_copied": False,
+                "bf16_full_x_allocated": False, "gemm_executed": False,
+                "kernel_or_output_parity_verified": False}}
+
+
+def nvfp4_full_m_crop_output(full_output, *, full_rows, global_start, global_stop, output_cols):
+    """Clone the original global window so the caller can release the full-Y storage."""
+    values = (full_rows, global_start, global_stop, output_cols)
+    if (any(type(n) is not int for n in values) or full_rows <= 0 or output_cols <= 0
+            or not 0 <= global_start < global_stop <= full_rows
+            or not isinstance(full_output, torch.Tensor) or full_output.dtype != torch.bfloat16
+            or tuple(full_output.shape) != (full_rows, output_cols)
+            or not full_output.is_contiguous() or full_output.requires_grad):
+        raise RuntimeError("full_m_output_crop_invalid")
+    return full_output[global_start:global_stop].clone(memory_format=torch.contiguous_format)
+
+
+FULL_M_DIAGNOSTIC_PROBE_ONLY = True
+FULL_M_ERROR_CODES = ("full_m_scope_invalid", "full_m_input_invalid", "full_m_memory_insufficient",
+                     "full_m_preparation_failed", "full_m_execution_failed", "full_m_peer_rejected")
+
+
+def full_m_installation_vote(trace, ctx):
+    replay = getattr(trace, "replay", None)
+    probe = getattr(replay, "full_m", None)
+    ready = (not trace.errors and replay is not None and replay.installed
+             and replay.error_code is None and probe is not None and probe.ctx is ctx)
+    flag = torch.tensor([int(ready)], dtype=torch.int32, device="cuda:0")
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)
+    if not bool(flag.item()):
+        logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=installation code=full_m_scope_invalid", ctx.rank)
+        raise RuntimeError("MiniMax SP full-M diagnostic installation rejected")
+    probe.installation_verified = True
+
+
+def _full_m_outside_zero(buffers, start, stop):
+    """Inspect actual new storage, including padding; no full-sized masks/copies."""
+    data = buffers["qdata"]
+    scales = buffers["block_scale"].view(torch.uint8)
+    columns = scales.shape[1]
+    if bool(torch.count_nonzero(data[:start]).item()) or bool(torch.count_nonzero(data[stop:]).item()):
+        return False
+    for first in range(0, scales.shape[0], 128):
+        last = first + 128
+        if last <= start or first >= stop:
+            if bool(torch.count_nonzero(scales[first:last]).item()):
+                return False
+        elif first < start or last > stop:
+            plain = _full_m_unblock_tile(scales[first:last], columns)
+            try:
+                left = max(0, start - first)
+                right = min(128, stop - first)
+                if bool(torch.count_nonzero(plain[:left]).item()) or bool(torch.count_nonzero(plain[right:]).item()):
+                    return False
+            finally:
+                del plain
+    return True
+
+
+class FullMProjection:
+    """One verify-only SP target, entirely inside its original cast context.
+
+    The two ballots are at this same target on both ranks. A rejected preparation
+    or execution is fatal for the diagnostic; no smaller-M fallback is performed.
+    Neither the native oracle nor the world1 mirror creates this object.
+    """
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.calls = self.ballots = 0
+        self.record = None
+        self.installation_verified = False
+
+    def _vote(self, code, phase):
+        # Device choice is worker-local cuda:0 on both ranks, even if a malformed
+        # argument failed its validation; every rank still reaches the ballot.
+        flag = torch.tensor([int(code is None)], dtype=torch.int32, device="cuda:0")
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=self.ctx.group)
+        self.ballots += 1
+        if not bool(flag.item()):
+            safe_code = code if code in FULL_M_ERROR_CODES else "full_m_peer_rejected"
+            logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=%s code=%s",
+                         self.ctx.rank, phase, safe_code)
+            raise RuntimeError("MiniMax SP full-M diagnostic rejected")
+
+    def execute(self, original, qinput, weight, bias):
+        self.calls += 1
+        ctx = self.ctx
+        code = None
+        buffers = full_input = full_output = crop = None
+        try:
+            try:
+                if (not self.installation_verified or ctx.world != 2 or ctx.rank not in (0, 1) or self.calls != 1
+                        or ctx.seq_len != 45167 or ctx.splits != [22584, 22583]
+                        or (ctx.start, ctx.stop) != ((0, 22584) if ctx.rank == 0 else (22584, 45167))):
+                    raise ValueError("scope")
+                source = _replay_quantized_identity(qinput, tensor_global_start=ctx.start,
+                                                  windows=[(ctx.start, ctx.stop)])
+                if (source["shape"] != [ctx.local, 7168] or qinput._qdata.device.type != "cuda"
+                        or qinput._qdata.device.index != 0):
+                    raise ValueError("input")
+                weight_sha, bias_sha = _replay_weight_bias(weight, bias)
+                budget = nvfp4_full_m_budget(local_rows=ctx.local, full_rows=ctx.seq_len,
+                    input_cols=7168, global_start=ctx.start, output_cols=5376)
+                torch.cuda.synchronize(qinput._qdata.device)
+                free = int(torch.cuda.mem_get_info(qinput._qdata.device)[0])
+                reserved = int(torch.cuda.memory_reserved(qinput._qdata.device))
+                allocated = int(torch.cuda.memory_allocated(qinput._qdata.device))
+                if free < max(REPLAY_MINIMUM_FREE_BYTES, budget["conservative_additional_bytes"]):
+                    code = "full_m_memory_insufficient"
+                else:
+                    buffers = nvfp4_full_m_zero_pad_storage(qinput._qdata, qinput._params.block_scale,
+                        qinput._params.scale, local_rows=ctx.local, full_rows=ctx.seq_len,
+                        input_cols=7168, global_start=ctx.start,
+                        allocation_limit_bytes=budget["helper_extra_bound_bytes"])
+                    params = dataclasses.replace(qinput._params, orig_shape=(ctx.seq_len, 7168),
+                                                 block_scale=buffers["block_scale"])
+                    full_input = type(qinput)(buffers["qdata"], qinput._layout_cls, params)
+                    executed = _replay_quantized_identity(full_input, tensor_global_start=0,
+                                                         windows=[(ctx.start, ctx.stop)])
+                    outside_zero = _full_m_outside_zero(buffers, ctx.start, ctx.stop)
+                    if (params.scale is not qinput._params.scale or params.orig_dtype != qinput._params.orig_dtype
+                            or params.transposed != qinput._params.transposed
+                            or executed["windows"][0] != source["windows"][0] or not outside_zero):
+                        raise ValueError("retained_input")
+            except Exception:
+                code = code or "full_m_preparation_failed"
+            self._vote(code, "preparation")
+            try:
+                # This is the only target GEMM: preserve the actual cast W/B
+                # objects and the ordinary dispatcher; never call from_float.
+                full_output = original(full_input, weight, bias)
+                crop = nvfp4_full_m_crop_output(full_output, full_rows=ctx.seq_len,
+                    global_start=ctx.start, global_stop=ctx.stop, output_cols=5376)
+                crop_sha = streamed_tensor_sha256(crop, tensor_global_start=ctx.start,
+                    global_start=ctx.start, global_stop=ctx.stop)["sha256"]
+                self.record = {"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": ctx.rank,
+                    "scope": "verify_first_forward_only", "applied": True, "call_count": self.calls,
+                    "global_start": ctx.start, "global_stop": ctx.stop, "local_logical_rows": ctx.local,
+                    "source_padded_rows": source["padded_rows"], "full_logical_rows": ctx.seq_len,
+                    "full_padded_rows": executed["padded_rows"], "input_width": 7168, "output_width": 5376,
+                    "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",
+                    "source_local_input": source["windows"][0], "executed_retained_input": executed["windows"][0],
+                    "retained_input_match": True, "outside_window_zero": outside_zero,
+                    "source_weight": weight_sha, "source_bias": bias_sha,
+                    "scale_object_reused": params.scale is qinput._params.scale,
+                    "weight_object_reused": True, "bias_object_reused": True,
+                    "crop_sha256": crop_sha, "crop_shape": list(crop.shape), "crop_cloned": True,
+                    "minimum_free_bytes": REPLAY_MINIMUM_FREE_BYTES, "free_bytes": free,
+                    "reserved_bytes": reserved, "allocated_bytes": allocated,
+                    "calculated_additional_bytes": budget["conservative_additional_bytes"],
+                    "installation_ballot_count": 1,
+                    "backend_verified": False, "native_oracle_changed": False, "formal_eligible": False}
+            except Exception:
+                code = "full_m_execution_failed"
+            self._vote(code, "execution")
+            self.record["ballot_count"] = self.ballots
+            return crop
+        finally:
+            # crop owns separate storage; no caller keeps the full-M allocation.
+            del full_output, full_input, buffers
+
+
+def projection_full_m_summary(packets, native):
+    rows = []
+    if native.get("projection_replay", {}).get("full_m") is not None:
+        raise RuntimeError("full_m_native_intervention_rejected")
+    for rank, packet in enumerate(packets):
+        row = packet.get("projection_replay", {}).get("full_m")
+        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("applied") is not True
+                or row.get("scope") != "verify_first_forward_only" or row.get("call_count") != 1
+                or row.get("ballot_count") != 2 or row.get("formal_eligible") is not False
+                or row.get("installation_ballot_count") != 1
+                or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]
+                or row.get("source_local_input") != row.get("executed_retained_input")
+                or row.get("outside_window_zero") is not True):
+            raise RuntimeError("full_m_diagnostic_packet_incomplete")
+        digest = packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]
+        if row.get("crop_sha256") != digest:
+            raise RuntimeError("full_m_returned_crop_hash_mismatch")
+        rows.append(row)
+    return rows
+# END reviewed verify-only full-M projection probe
+
+
 class ProjectionReplay:
     """One actual target call observed per scope; native alone replays two row windows.
 
     Wrapping _forward stays inside the original CastBiasWeightContext. It does not
     change backend dispatch; a QT argument does not prove a particular CUDA kernel.
     """
-    def __init__(self, module, *, rank, start, stop, windows):
+    def __init__(self, module, *, rank, start, stop, windows, full_m_ctx=None):
         self.module, self.rank, self.start, self.stop = module, rank, start, stop
+        self.full_m = None if full_m_ctx is None else FullMProjection(full_m_ctx)
         self.windows = list(windows)
         self.input = self.capture = None
         self.replays = []
@@ -298,7 +593,8 @@ class ProjectionReplay:
             def wrapped(qinput, weight, bias):
                 self.call_count += 1
                 try:
-                    result = self.original(qinput, weight, bias)
+                    result = (self.original(qinput, weight, bias) if self.full_m is None
+                              else self.full_m.execute(self.original, qinput, weight, bias))
                     self._observe(qinput, weight, bias, result)
                     return result
                 finally:
@@ -396,7 +692,8 @@ class ProjectionReplay:
         if code is None and (self.call_count != 1 or self.capture is None or (self.rank == -1 and len(self.replays) != 2)):
             code = "quantized_capture_failed"
         status = "complete" if code is None else ("budget_insufficient" if code == "memory_budget_insufficient" else "error")
-        return {"capture": self.capture, "replays": list(self.replays), "status": {
+        return {"capture": self.capture, "replays": list(self.replays),
+            "full_m": None if self.full_m is None else self.full_m.record, "status": {
             "schema_version": 1, "block": 34, "point": "attn.out_proj", "phase": "native" if self.rank == -1 else "sp2",
             "rank": self.rank, "status": status, "error_code": code, "call_count": self.call_count,
             "captured": self.capture is not None, "replay_count": len(self.replays), "backend_verified": False,
@@ -422,6 +719,7 @@ def projection_replay_summary(packets, native):
                 "global_start": packet["start"], "global_stop": packet["stop"], "input_width": 7168,
                 "output_width": 5376, "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",
                 "sp_padded_rows": captured["input"]["padded_rows"], "native_padded_rows": reference["input"]["padded_rows"],
+                "sp_input_scope": "source_local_before_full_m_padding",
                 "sp_input": sp_input, "native_input": native_input, "input_match": sp_input == native_input,
                 "sp_weight": captured["weight"], "native_weight": reference["weight"],
                 "weight_match": captured["weight"] == reference["weight"],
@@ -462,14 +760,15 @@ def stored_head_metadata(final_layer):
 
 
 class Block0Trace:
-    """Diagnostic CPU samples only; hooks never change a model result.
+    """Diagnostic CPU samples, plus an explicit SP-only block34 full-M probe.
 
     Block34 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
     before native in-place RoPE/residual updates can change those rows. The
     native oracle samples the union of both ranks' rows. No tensor is logged.
     """
-    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None):
+    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None, sp_ctx=None):
         self.dit, self.rank, self.start, self.stop = dit, rank, start, stop
+        self.sp_ctx = sp_ctx
         count = stop - start
         self.rows = (sorted({start + i * (count - 1) // 6 for i in range(7)})
                      if rows is None and count > 0 else list(rows or []))
@@ -520,7 +819,7 @@ class Block0Trace:
                 raise RuntimeError("layer_trace_requires_50_blocks")
             block = self.dit.blocks[TRACE_PROJECTION_BLOCK]
             self.replay = ProjectionReplay(block.attn.out_proj, rank=self.rank, start=self.start,
-                                           stop=self.stop, windows=self.hash_windows)
+                                           stop=self.stop, windows=self.hash_windows, full_m_ctx=self.sp_ctx)
             self.replay.__enter__()
             for name, module in (("attn.qkv_proj", block.attn.qkv_proj),
                                  ("attn.out_proj", block.attn.out_proj),
@@ -1219,13 +1518,15 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(dit.blocks), device, transformer_options)
     # BEGIN reviewed block0 trace scope
-    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop)
+    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop, sp_ctx=ctx)
              if ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True else None)
     # END reviewed block0 trace scope
     # BEGIN reviewed SP2 activation amax loop
     scale_context = (SPNVFP4AmaxScope(dit, ctx, torch_module=torch, dist_module=dist,
                                     quant_ops=comfy.quant_ops) if ctx.world == 2 else nullcontext())
     with scale_context as scale_scope, (trace if trace is not None else nullcontext()):
+        if trace is not None:
+            full_m_installation_vote(trace, ctx)
         for i, block in enumerate(dit.blocks):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
             transformer_options["block_index"] = i

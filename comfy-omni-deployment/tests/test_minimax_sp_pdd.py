@@ -23,10 +23,25 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+FULL_M_REVERSE_EDITS = {'sp_forward.py': [(25, 26, 'import dataclasses\n', ''), (264, 557, '# BEGIN reviewed verify-only full-M projection probe\ndef _full_m_sizes(*, local_rows, full_rows, input_cols, global_start):\n    values = (local_rows, full_rows, input_cols, global_start)\n    if (any(type(n) is not int for n in values) or local_rows <= 0 or full_rows <= 0\n            or input_cols <= 0 or input_cols % 16 or global_start < 0\n            or global_start + local_rows > full_rows):\n        raise RuntimeError("full_m_geometry_invalid")\n    cols = input_cols // 16\n    padded_cols = (cols + 3) // 4 * 4\n    qrows = (full_rows + 15) // 16 * 16\n    srows = (full_rows + 127) // 128 * 128\n    # Conservative bound on simultaneous tile-sized reshape/copy intermediates.\n    scratch = 6 * 128 * padded_cols\n    return {"logical_rows": full_rows, "local_rows": local_rows,\n            "global_start": global_start, "global_stop": global_start + local_rows,\n            "input_cols": input_cols, "logical_scale_cols": cols,\n            "qdata_shape": [qrows, input_cols // 2],\n            "block_scale_shape": [srows, padded_cols],\n            "qdata_bytes": qrows * (input_cols // 2),\n            "block_scale_bytes": srows * padded_cols,\n            "layout_scratch_bound_bytes": scratch}\n\n\ndef nvfp4_full_m_budget(*, local_rows, full_rows, input_cols, global_start,\n                       output_cols, workspace_bytes=33554432):\n    """Calculated additional buffers, not an allocator or measured free-memory gate."""\n    if (type(output_cols) is not int or output_cols <= 0\n            or type(workspace_bytes) is not int or workspace_bytes < 0):\n        raise RuntimeError("full_m_budget_invalid")\n    sizes = _full_m_sizes(local_rows=local_rows, full_rows=full_rows,\n                          input_cols=input_cols, global_start=global_start)\n    storage = sizes["qdata_bytes"] + sizes["block_scale_bytes"]\n    full_y = sizes["qdata_shape"][0] * output_cols * 2  # BF16 output; retain padded allocation.\n    crop = local_rows * output_cols * 2  # Clone required before full-Y can be released.\n    return {"schema_version": 1, "kind": "calculated_not_measured", **sizes,\n            "new_packed_storage_bytes": storage,\n            "helper_extra_bound_bytes": storage + sizes["layout_scratch_bound_bytes"],\n            "full_y_bf16_bytes": full_y, "crop_bf16_bytes": crop,\n            "workspace_bytes": workspace_bytes,\n            "conservative_additional_bytes": storage + sizes["layout_scratch_bound_bytes"]\n                + full_y + crop + workspace_bytes,\n            "excludes_existing_inputs_weights_allocator_other_kernels": True,\n            "bf16_full_x_bytes": 0, "measured_peak": False}\n\n\ndef _full_m_unblock_tile(tile, padded_cols):\n    a = tile.reshape(-1, 32, 4, 4).transpose(1, 2)\n    b = a.reshape(1, padded_cols // 4, 128, 4)\n    return b.permute(0, 2, 1, 3).reshape(128, padded_cols)\n\n\ndef _full_m_block_tile(tile, padded_cols):\n    a = tile.reshape(1, 128, padded_cols // 4, 4).permute(0, 2, 1, 3)\n    return a.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(128, padded_cols)\n\n\ndef nvfp4_full_m_zero_pad_storage(qdata, block_scale, scale, *, local_rows,\n                                full_rows, input_cols, global_start,\n                                allocation_limit_bytes):\n    """Return new packed buffers and the exact same scalar scale object.\n\n    Only source logical rows/columns are copied; all other target bytes are zero.\n    Work stays on the input device. No quantization/dequantization is performed.\n    The explicit limit bounds this helper\'s buffers only, not a following GEMM.\n    Caller must retain W/precision/global scale and separately prove full parity.\n    """\n    sizes = _full_m_sizes(local_rows=local_rows, full_rows=full_rows,\n                          input_cols=input_cols, global_start=global_start)\n    columns = sizes["logical_scale_cols"]\n    padded_cols = sizes["block_scale_shape"][1]\n    bound = sizes["qdata_bytes"] + sizes["block_scale_bytes"] + sizes["layout_scratch_bound_bytes"]\n    if type(allocation_limit_bytes) is not int or allocation_limit_bytes < bound:\n        raise RuntimeError("full_m_allocation_budget_insufficient")\n    if (not all(isinstance(tensor, torch.Tensor) for tensor in (qdata, block_scale, scale))\n            or qdata.dtype != torch.uint8 or block_scale.dtype != torch.float8_e4m3fn\n            or scale.dtype != torch.float32 or scale.numel() != 1\n            or qdata.ndim != 2 or block_scale.ndim != 2\n            or not all(tensor.is_contiguous() for tensor in (qdata, block_scale, scale))\n            or tuple(qdata.shape) != ((local_rows + 15) // 16 * 16, input_cols // 2)\n            or tuple(block_scale.shape) != ((local_rows + 127) // 128 * 128, padded_cols)\n            or not (qdata.device == block_scale.device == scale.device)\n            or any(tensor.requires_grad for tensor in (qdata, block_scale, scale))\n            or not bool(torch.isfinite(scale).all().item())\n            or not bool((scale >= 0).all().item())):\n        raise RuntimeError("full_m_storage_or_scale_invalid")\n    full_qdata = torch.zeros(tuple(sizes["qdata_shape"]), dtype=torch.uint8, device=qdata.device)\n    full_scales = torch.zeros(tuple(sizes["block_scale_shape"]), dtype=torch.uint8, device=qdata.device)\n    full_qdata[global_start:global_start + local_rows].copy_(qdata[:local_rows])\n    source_bytes = block_scale.view(torch.uint8)\n    global_stop = global_start + local_rows\n    for target_start in range((global_start // 128) * 128, global_stop, 128):\n        logical_tile = torch.zeros((128, padded_cols), dtype=torch.uint8, device=qdata.device)\n        overlap_start = max(global_start, target_start)\n        overlap_stop = min(global_stop, target_start + 128)\n        source_start, source_stop = overlap_start - global_start, overlap_stop - global_start\n        for source_tile_start in range((source_start // 128) * 128, source_stop, 128):\n            unblocked = _full_m_unblock_tile(source_bytes[source_tile_start:source_tile_start + 128], padded_cols)\n            first = max(source_start, source_tile_start)\n            last = min(source_stop, source_tile_start + 128)\n            target_first = global_start + first - target_start\n            logical_tile[target_first:target_first + last - first, :columns].copy_(\n                unblocked[first - source_tile_start:last - source_tile_start, :columns])\n            del unblocked\n        blocked = _full_m_block_tile(logical_tile, padded_cols)\n        full_scales[target_start:target_start + 128].copy_(blocked)\n        del blocked, logical_tile\n    return {"qdata": full_qdata, "block_scale": full_scales.view(torch.float8_e4m3fn),\n            "scale": scale, "metadata": {"schema_version": 1, **sizes,\n                "helper_extra_bound_bytes": bound, "scale_object_reused": True,\n                "outside_window_zero": True, "source_padding_copied": False,\n                "bf16_full_x_allocated": False, "gemm_executed": False,\n                "kernel_or_output_parity_verified": False}}\n\n\ndef nvfp4_full_m_crop_output(full_output, *, full_rows, global_start, global_stop, output_cols):\n    """Clone the original global window so the caller can release the full-Y storage."""\n    values = (full_rows, global_start, global_stop, output_cols)\n    if (any(type(n) is not int for n in values) or full_rows <= 0 or output_cols <= 0\n            or not 0 <= global_start < global_stop <= full_rows\n            or not isinstance(full_output, torch.Tensor) or full_output.dtype != torch.bfloat16\n            or tuple(full_output.shape) != (full_rows, output_cols)\n            or not full_output.is_contiguous() or full_output.requires_grad):\n        raise RuntimeError("full_m_output_crop_invalid")\n    return full_output[global_start:global_stop].clone(memory_format=torch.contiguous_format)\n\n\nFULL_M_DIAGNOSTIC_PROBE_ONLY = True\nFULL_M_ERROR_CODES = ("full_m_scope_invalid", "full_m_input_invalid", "full_m_memory_insufficient",\n                     "full_m_preparation_failed", "full_m_execution_failed", "full_m_peer_rejected")\n\n\ndef full_m_installation_vote(trace, ctx):\n    replay = getattr(trace, "replay", None)\n    probe = getattr(replay, "full_m", None)\n    ready = (not trace.errors and replay is not None and replay.installed\n             and replay.error_code is None and probe is not None and probe.ctx is ctx)\n    flag = torch.tensor([int(ready)], dtype=torch.int32, device="cuda:0")\n    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)\n    if not bool(flag.item()):\n        logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=installation code=full_m_scope_invalid", ctx.rank)\n        raise RuntimeError("MiniMax SP full-M diagnostic installation rejected")\n    probe.installation_verified = True\n\n\ndef _full_m_outside_zero(buffers, start, stop):\n    """Inspect actual new storage, including padding; no full-sized masks/copies."""\n    data = buffers["qdata"]\n    scales = buffers["block_scale"].view(torch.uint8)\n    columns = scales.shape[1]\n    if bool(torch.count_nonzero(data[:start]).item()) or bool(torch.count_nonzero(data[stop:]).item()):\n        return False\n    for first in range(0, scales.shape[0], 128):\n        last = first + 128\n        if last <= start or first >= stop:\n            if bool(torch.count_nonzero(scales[first:last]).item()):\n                return False\n        elif first < start or last > stop:\n            plain = _full_m_unblock_tile(scales[first:last], columns)\n            try:\n                left = max(0, start - first)\n                right = min(128, stop - first)\n                if bool(torch.count_nonzero(plain[:left]).item()) or bool(torch.count_nonzero(plain[right:]).item()):\n                    return False\n            finally:\n                del plain\n    return True\n\n\nclass FullMProjection:\n    """One verify-only SP target, entirely inside its original cast context.\n\n    The two ballots are at this same target on both ranks. A rejected preparation\n    or execution is fatal for the diagnostic; no smaller-M fallback is performed.\n    Neither the native oracle nor the world1 mirror creates this object.\n    """\n    def __init__(self, ctx):\n        self.ctx = ctx\n        self.calls = self.ballots = 0\n        self.record = None\n        self.installation_verified = False\n\n    def _vote(self, code, phase):\n        # Device choice is worker-local cuda:0 on both ranks, even if a malformed\n        # argument failed its validation; every rank still reaches the ballot.\n        flag = torch.tensor([int(code is None)], dtype=torch.int32, device="cuda:0")\n        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=self.ctx.group)\n        self.ballots += 1\n        if not bool(flag.item()):\n            safe_code = code if code in FULL_M_ERROR_CODES else "full_m_peer_rejected"\n            logging.info("[minimax_sp][projection_full_m_error] rank=%d phase=%s code=%s",\n                         self.ctx.rank, phase, safe_code)\n            raise RuntimeError("MiniMax SP full-M diagnostic rejected")\n\n    def execute(self, original, qinput, weight, bias):\n        self.calls += 1\n        ctx = self.ctx\n        code = None\n        buffers = full_input = full_output = crop = None\n        try:\n            try:\n                if (not self.installation_verified or ctx.world != 2 or ctx.rank not in (0, 1) or self.calls != 1\n                        or ctx.seq_len != 45167 or ctx.splits != [22584, 22583]\n                        or (ctx.start, ctx.stop) != ((0, 22584) if ctx.rank == 0 else (22584, 45167))):\n                    raise ValueError("scope")\n                source = _replay_quantized_identity(qinput, tensor_global_start=ctx.start,\n                                                  windows=[(ctx.start, ctx.stop)])\n                if (source["shape"] != [ctx.local, 7168] or qinput._qdata.device.type != "cuda"\n                        or qinput._qdata.device.index != 0):\n                    raise ValueError("input")\n                weight_sha, bias_sha = _replay_weight_bias(weight, bias)\n                budget = nvfp4_full_m_budget(local_rows=ctx.local, full_rows=ctx.seq_len,\n                    input_cols=7168, global_start=ctx.start, output_cols=5376)\n                torch.cuda.synchronize(qinput._qdata.device)\n                free = int(torch.cuda.mem_get_info(qinput._qdata.device)[0])\n                reserved = int(torch.cuda.memory_reserved(qinput._qdata.device))\n                allocated = int(torch.cuda.memory_allocated(qinput._qdata.device))\n                if free < max(REPLAY_MINIMUM_FREE_BYTES, budget["conservative_additional_bytes"]):\n                    code = "full_m_memory_insufficient"\n                else:\n                    buffers = nvfp4_full_m_zero_pad_storage(qinput._qdata, qinput._params.block_scale,\n                        qinput._params.scale, local_rows=ctx.local, full_rows=ctx.seq_len,\n                        input_cols=7168, global_start=ctx.start,\n                        allocation_limit_bytes=budget["helper_extra_bound_bytes"])\n                    params = dataclasses.replace(qinput._params, orig_shape=(ctx.seq_len, 7168),\n                                                 block_scale=buffers["block_scale"])\n                    full_input = type(qinput)(buffers["qdata"], qinput._layout_cls, params)\n                    executed = _replay_quantized_identity(full_input, tensor_global_start=0,\n                                                         windows=[(ctx.start, ctx.stop)])\n                    outside_zero = _full_m_outside_zero(buffers, ctx.start, ctx.stop)\n                    if (params.scale is not qinput._params.scale or params.orig_dtype != qinput._params.orig_dtype\n                            or params.transposed != qinput._params.transposed\n                            or executed["windows"][0] != source["windows"][0] or not outside_zero):\n                        raise ValueError("retained_input")\n            except Exception:\n                code = code or "full_m_preparation_failed"\n            self._vote(code, "preparation")\n            try:\n                # This is the only target GEMM: preserve the actual cast W/B\n                # objects and the ordinary dispatcher; never call from_float.\n                full_output = original(full_input, weight, bias)\n                crop = nvfp4_full_m_crop_output(full_output, full_rows=ctx.seq_len,\n                    global_start=ctx.start, global_stop=ctx.stop, output_cols=5376)\n                crop_sha = streamed_tensor_sha256(crop, tensor_global_start=ctx.start,\n                    global_start=ctx.start, global_stop=ctx.stop)["sha256"]\n                self.record = {"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": ctx.rank,\n                    "scope": "verify_first_forward_only", "applied": True, "call_count": self.calls,\n                    "global_start": ctx.start, "global_stop": ctx.stop, "local_logical_rows": ctx.local,\n                    "source_padded_rows": source["padded_rows"], "full_logical_rows": ctx.seq_len,\n                    "full_padded_rows": executed["padded_rows"], "input_width": 7168, "output_width": 5376,\n                    "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",\n                    "source_local_input": source["windows"][0], "executed_retained_input": executed["windows"][0],\n                    "retained_input_match": True, "outside_window_zero": outside_zero,\n                    "source_weight": weight_sha, "source_bias": bias_sha,\n                    "scale_object_reused": params.scale is qinput._params.scale,\n                    "weight_object_reused": True, "bias_object_reused": True,\n                    "crop_sha256": crop_sha, "crop_shape": list(crop.shape), "crop_cloned": True,\n                    "minimum_free_bytes": REPLAY_MINIMUM_FREE_BYTES, "free_bytes": free,\n                    "reserved_bytes": reserved, "allocated_bytes": allocated,\n                    "calculated_additional_bytes": budget["conservative_additional_bytes"],\n                    "installation_ballot_count": 1,\n                    "backend_verified": False, "native_oracle_changed": False, "formal_eligible": False}\n            except Exception:\n                code = "full_m_execution_failed"\n            self._vote(code, "execution")\n            self.record["ballot_count"] = self.ballots\n            return crop\n        finally:\n            # crop owns separate storage; no caller keeps the full-M allocation.\n            del full_output, full_input, buffers\n\n\ndef projection_full_m_summary(packets, native):\n    rows = []\n    if native.get("projection_replay", {}).get("full_m") is not None:\n        raise RuntimeError("full_m_native_intervention_rejected")\n    for rank, packet in enumerate(packets):\n        row = packet.get("projection_replay", {}).get("full_m")\n        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("applied") is not True\n                or row.get("scope") != "verify_first_forward_only" or row.get("call_count") != 1\n                or row.get("ballot_count") != 2 or row.get("formal_eligible") is not False\n                or row.get("installation_ballot_count") != 1\n                or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]\n                or row.get("source_local_input") != row.get("executed_retained_input")\n                or row.get("outside_window_zero") is not True):\n            raise RuntimeError("full_m_diagnostic_packet_incomplete")\n        digest = packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]\n        if row.get("crop_sha256") != digest:\n            raise RuntimeError("full_m_returned_crop_hash_mismatch")\n        rows.append(row)\n    return rows\n# END reviewed verify-only full-M projection probe\n\n\n', ''), (563, 564, '    def __init__(self, module, *, rank, start, stop, windows, full_m_ctx=None):\n', '    def __init__(self, module, *, rank, start, stop, windows):\n'), (565, 566, '        self.full_m = None if full_m_ctx is None else FullMProjection(full_m_ctx)\n', ''), (595, 597, '                    result = (self.original(qinput, weight, bias) if self.full_m is None\n                              else self.full_m.execute(self.original, qinput, weight, bias))\n', '                    result = self.original(qinput, weight, bias)\n'), (694, 696, '        return {"capture": self.capture, "replays": list(self.replays),\n            "full_m": None if self.full_m is None else self.full_m.record, "status": {\n', '        return {"capture": self.capture, "replays": list(self.replays), "status": {\n'), (721, 722, '                "sp_input_scope": "source_local_before_full_m_padding",\n', ''), (762, 763, '    """Diagnostic CPU samples, plus an explicit SP-only block34 full-M probe.\n', '    """Diagnostic CPU samples only; hooks never change a model result.\n'), (768, 769, '    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None, sp_ctx=None):\n', '    def __init__(self, dit, *, rank, start, stop, rows=None, hash_windows=None):\n'), (770, 771, '        self.sp_ctx = sp_ctx\n', ''), (821, 822, '                                           stop=self.stop, windows=self.hash_windows, full_m_ctx=self.sp_ctx)\n', '                                           stop=self.stop, windows=self.hash_windows)\n'), (1520, 1521, '    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop, sp_ctx=ctx)\n', '    trace = (Block0Trace(dit, rank=rank, start=ctx.start, stop=ctx.stop)\n'), (1527, 1529, '        if trace is not None:\n            full_m_installation_vote(trace, ctx)\n', '')], 'sp_group.py': [(206, 208, '        if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY and os.environ.get("MINIMAX_SP_VERIFY") != "1":\n            raise RuntimeError("MiniMax SP full-M probe requires verification; formal execution is disabled")\n', ''), (392, 393, '                            logging.info("[minimax_sp][projection_source_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '                            logging.info("[minimax_sp][projection_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n'), (395, 398, '                        full_m_rows = spf.projection_full_m_summary(packets, native_trace.packet())\n                        for row in full_m_rows:\n                            logging.info("[minimax_sp][projection_full_m] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', ''), (419, 422, '                if spf.FULL_M_DIAGNOSTIC_PROBE_ONLY:\n                    logging.info("[minimax_sp][full_m_probe_complete] native_parity_pass=1 formal_eligible=0")\n                    raise RuntimeError("MiniMax SP full-M diagnostic complete; formal execution remains disabled")\n', '')]}
+FULL_M_PRIOR_SHA = {'sp_forward.py': '73b12335ed6ad131285bfb746a13661ce7d206c81a15752db43c8e1b212001e4', 'sp_group.py': '881e10961aa812802af7834aa01724c3d6becdb6bdc2fee4e3056ba3fbf232d5'}
+
+def reverse_full_m(source, name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(FULL_M_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('full-M reviewed block digest/source changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=FULL_M_PRIOR_SHA[name]:
+        raise AssertionError('full-M reviewed block digest differs from deployed headroom source')
+    return source
+
 PROJECTION_REPLAY_REVERSE_EDITS = {'sp_forward.py': [(106, 435, 'def nvfp4_scale_sha256(block_scale, *, logical_rows, logical_cols,\n                       global_start, global_stop, tensor_global_start=0,\n                       chunk_limit_bytes=16777216):\n    """Return a canonical logical-window SHA; never dequantize or move all scales.\n\n    Layout inverse follows comfy-kitchen v0.2.39 float_utils.from_blocked,\n    commit e40e76d9c544b3f74c3b9ea923f7bc3d45a96372, lines 329--352.\n    FP8 bytes, including signed zero/NaN encodings, remain unchanged.\n    """\n    integers = (logical_rows, logical_cols, global_start, global_stop,\n                tensor_global_start, chunk_limit_bytes)\n    if (any(type(value) is not int for value in integers)\n            or logical_rows <= 0 or logical_cols <= 0\n            or tensor_global_start < 0\n            or not 0 < chunk_limit_bytes <= 16777216\n            or not tensor_global_start <= global_start < global_stop <= tensor_global_start + logical_rows\n            or sys.byteorder != "little"):\n        raise RuntimeError("nvfp4_scale_hash_window_or_limit_invalid")\n    padded_rows = ((logical_rows + 127) // 128) * 128\n    padded_cols = ((logical_cols + 3) // 4) * 4\n    tile_bytes = 128 * padded_cols\n    if (not isinstance(block_scale, torch.Tensor) or block_scale.ndim != 2\n            or block_scale.dtype != torch.float8_e4m3fn\n            or tuple(block_scale.shape) != (padded_rows, padded_cols)\n            or not block_scale.is_contiguous()\n            or tile_bytes > chunk_limit_bytes):\n        raise RuntimeError("nvfp4_scale_hash_physical_layout_invalid")\n\n    header = {"schema": "minimax-sp-layer-sha256-v1", "dtype": "torch.uint8",\n              "shape": [global_stop - global_start, logical_cols],\n              "global_start": global_start, "global_stop": global_stop,\n              "byte_order": "little", "order": "C"}\n    digest = hashlib.sha256()\n    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\\n")\n    local_start = global_start - tensor_global_start\n    local_stop = global_stop - tensor_global_start\n    storage = block_scale.view(torch.uint8)\n    copied_bytes = 0\n    for tile_start in range((local_start // 128) * 128, local_stop, 128):\n        tile = storage[tile_start:tile_start + 128].detach().to(\n            device="cpu", non_blocking=False, copy=True,\n            memory_format=torch.contiguous_format)\n        # One complete 128-row physical tile contains all its column blocks.\n        # Do the inverse only after the bounded synchronous copy to CPU.\n        step1 = tile.reshape(-1, 32, 16)\n        step2 = step1.reshape(-1, 32, 4, 4).transpose(1, 2)\n        step3 = step2.reshape(1, padded_cols // 4, 4, 32, 4)\n        step4 = step3.reshape(1, padded_cols // 4, 128, 4)\n        unblocked = step4.permute(0, 2, 1, 3).reshape(128, padded_cols)\n        first = max(local_start, tile_start) - tile_start\n        last = min(local_stop, tile_start + 128) - tile_start\n        selected = unblocked[first:last, :logical_cols].contiguous()\n        array = selected.numpy()\n        view = memoryview(array).cast("B")\n        try:\n            expected = (last - first) * logical_cols\n            if view.nbytes != expected or view.nbytes > chunk_limit_bytes:\n                raise RuntimeError("nvfp4_scale_hash_chunk_size_invalid")\n            digest.update(view)\n            copied_bytes += view.nbytes\n        finally:\n            view.release()\n            del view, array, selected, unblocked, step4, step3, step2, step1, tile\n    if copied_bytes != (global_stop - global_start) * logical_cols:\n        raise RuntimeError("nvfp4_scale_hash_byte_count_invalid")\n    return digest.hexdigest()\n\n# BEGIN reviewed projection M replay diagnostic\nREPLAY_MINIMUM_FREE_BYTES = 1024 * 1024 * 1024\nREPLAY_ERROR_CODES = ("input_guard_failed", "quantized_guard_failed", "memory_budget_insufficient",\n    "quantized_capture_failed", "replay_execution_failed", "output_compare_failed", "hook_install_failed",\n    "duplicate_target_call", "hook_restore_failed")\n\n\nclass ProjectionReplayError(RuntimeError):\n    pass\n\n\ndef _replay_require(condition, code):\n    if not condition:\n        raise ProjectionReplayError(code)\n\n\ndef _replay_digest(metadata):\n    return hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")).hexdigest()\n\n\ndef _replay_quantized_identity(value, *, tensor_global_start, windows):\n    """Hash actual cast QT storage/parameters, excluding padding from input windows."""\n    params, data = value._params, value._qdata\n    shape = list(params.orig_shape)\n    _replay_require(value._layout_cls == "TensorCoreNVFP4Layout" and len(shape) == 2\n        and str(params.orig_dtype) == "torch.bfloat16" and not params.transposed\n        and all(type(n) is int and n > 0 for n in shape) and shape[1] % 16 == 0\n        and str(data.dtype) == "torch.uint8" and data.is_contiguous()\n        and list(data.shape) == [((shape[0] + 15) // 16) * 16, shape[1] // 2]\n        and params.scale.numel() == 1 and str(params.scale.dtype) == "torch.float32",\n        "quantized_guard_failed")\n    scale_sha = streamed_tensor_sha256(params.scale.reshape(1, 1), tensor_global_start=0,\n                                      global_start=0, global_stop=1)["sha256"]\n    items = []\n    for start, stop in windows:\n        packed = streamed_tensor_sha256(data[:shape[0], :shape[1] // 2], tensor_global_start=tensor_global_start,\n                                        global_start=start, global_stop=stop)["sha256"]\n        scales = nvfp4_scale_sha256(params.block_scale, logical_rows=shape[0], logical_cols=shape[1] // 16,\n                                   tensor_global_start=tensor_global_start, global_start=start, global_stop=stop)\n        items.append({"qdata_sha256": packed, "block_scale_sha256": scales, "scale_sha256": scale_sha})\n    return {"shape": shape, "padded_rows": int(data.shape[0]), "dtype": "torch.bfloat16",\n            "layout": "TensorCoreNVFP4Layout", "windows": items}\n\n\ndef _replay_weight_bias(weight, bias):\n    info = _replay_quantized_identity(weight, tensor_global_start=0, windows=[(0, 5376)])\n    _replay_require(info["shape"] == [5376, 7168], "quantized_guard_failed")\n    if bias is None:\n        bias_info = {"present": False}\n    else:\n        _replay_require(list(bias.shape) == [5376] and str(bias.dtype) in ("torch.bfloat16", "torch.float32"),\n                        "quantized_guard_failed")\n        bias_info = {"present": True, "shape": [5376], "dtype": str(bias.dtype),\n            "sha256": streamed_tensor_sha256(bias.reshape(1, 5376), tensor_global_start=0,\n                                             global_start=0, global_stop=1)["sha256"]}\n    return _replay_digest(info), _replay_digest(bias_info)\n\n\ndef _replay_compare_outputs(full, shard, *, global_start, global_stop):\n    """Complete-window numbers; all CPU comparison scratch is row bounded."""\n    _replay_require(list(full.shape)[1:] == [5376] and list(shard.shape) == [global_stop - global_start, 5376]\n                    and str(full.dtype) == str(shard.dtype) == "torch.bfloat16", "output_compare_failed")\n    # At most five FP32 row buffers fit in the 16 MiB scratch budget.\n    chunk_rows = max(1, TRACE_HASH_CHUNK_BYTES // (5376 * 4 * 5))\n    maximum = reference_amax = 0.0\n    unequal = 0\n    finite = True\n    for offset in range(0, global_stop - global_start, chunk_rows):\n        count = min(chunk_rows, global_stop - global_start - offset)\n        a = full[global_start + offset:global_start + offset + count].detach().to(\n            device="cpu", dtype=torch.float32, non_blocking=False, copy=True, memory_format=torch.contiguous_format)\n        b = shard[offset:offset + count].detach().to(\n            device="cpu", dtype=torch.float32, non_blocking=False, copy=True, memory_format=torch.contiguous_format)\n        finite = finite and bool(torch.isfinite(a).all()) and bool(torch.isfinite(b).all())\n        unequal += int(torch.ne(a, b).sum().item())\n        if finite:\n            maximum = max(maximum, float(torch.max(torch.abs(a - b)).item()))\n            reference_amax = max(reference_amax, float(torch.max(torch.abs(a)).item()))\n        del a, b\n    full_sha = streamed_tensor_sha256(full, tensor_global_start=0,\n                                     global_start=global_start, global_stop=global_stop)["sha256"]\n    shard_sha = streamed_tensor_sha256(shard, tensor_global_start=global_start,\n                                      global_start=global_start, global_stop=global_stop)["sha256"]\n    return {"native_output_sha256": full_sha, "replay_output_sha256": shard_sha,\n            "output_bits_match": full_sha == shard_sha, "finite": finite,\n            "max_abs": maximum if finite else None,\n            "relative": maximum / max(reference_amax, 1e-6) if finite else None,\n            "unequal_elements": unequal, "compared_elements": (global_stop - global_start) * 5376}\n\n\nclass ProjectionReplay:\n    """One actual target call observed per scope; native alone replays two row windows.\n\n    Wrapping _forward stays inside the original CastBiasWeightContext. It does not\n    change backend dispatch; a QT argument does not prove a particular CUDA kernel.\n    """\n    def __init__(self, module, *, rank, start, stop, windows):\n        self.module, self.rank, self.start, self.stop = module, rank, start, stop\n        self.windows = list(windows)\n        self.input = self.capture = None\n        self.replays = []\n        self.call_count = 0\n        self.error_code = None\n        self.handles = []\n        self.installed = False\n        self.free_bytes = self.reserved_bytes = self.allocated_bytes = None\n\n    def __enter__(self):\n        try:\n            _replay_require(self.module.in_features == 7168 and self.module.out_features == 5376\n                and getattr(self.module, "pre_quant_scale", None) is None\n                and getattr(self.module, "input_scale", None) is None\n                and getattr(self.module, "quant_format", None) == "nvfp4"\n                and getattr(self.module, "layout_type", None) == "TensorCoreNVFP4Layout"\n                and not getattr(self.module, "_full_precision_mm", False)\n                and not getattr(self.module, "comfy_force_cast_weights", False)\n                and not getattr(self.module, "weight_function", ()) and not getattr(self.module, "bias_function", ()),\n                "input_guard_failed")\n            self.thread = threading.get_ident()\n            self.previous = vars(self.module).get("_forward", _ABSENT)\n            self.original = self.module._forward\n            def before(_module, inputs):\n                self.input = inputs[0] if inputs else None\n            self.handles.append(self.module.register_forward_pre_hook(before))\n            def wrapped(qinput, weight, bias):\n                self.call_count += 1\n                try:\n                    result = self.original(qinput, weight, bias)\n                    self._observe(qinput, weight, bias, result)\n                    return result\n                finally:\n                    self.input = None\n            self.wrapped = wrapped\n            self.module._forward = wrapped\n            self.installed = True\n        except ProjectionReplayError as exc:\n            self.error_code = exc.args[0]\n            self.__exit__(None, None, None)\n        except Exception:\n            self.error_code = "hook_install_failed"\n            self.__exit__(None, None, None)\n        return self\n\n    def _observe(self, qinput, weight, bias, full_output):\n        try:\n            _replay_require(self.call_count == 1, "duplicate_target_call")\n            source = self.input\n            _replay_require(threading.get_ident() == self.thread and source is not None\n                and list(source.shape) == [self.stop - self.start, 7168]\n                and str(source.dtype) == "torch.bfloat16" and source.is_contiguous()\n                and not source.requires_grad, "input_guard_failed")\n            inputs = _replay_quantized_identity(qinput, tensor_global_start=self.start, windows=self.windows)\n            _replay_require(inputs["shape"] == list(source.shape), "quantized_guard_failed")\n            weight_sha, bias_sha = _replay_weight_bias(weight, bias)\n            self.capture = {"input": inputs, "weight": weight_sha, "bias": bias_sha}\n        except ProjectionReplayError as exc:\n            self.error_code = exc.args[0]\n            return\n        except Exception:\n            self.error_code = "quantized_capture_failed"\n            return\n        if self.rank != -1:\n            return\n        try:\n            _replay_require(self.start == 0 and len(self.windows) == 2\n                and self.windows[0][0] == 0 and self.windows[0][1] == self.windows[1][0]\n                and self.windows[1][1] == self.stop, "input_guard_failed")\n            torch.cuda.synchronize(source.device)\n            self.free_bytes = int(torch.cuda.mem_get_info(source.device)[0])\n            self.reserved_bytes = int(torch.cuda.memory_reserved(source.device))\n            self.allocated_bytes = int(torch.cuda.memory_allocated(source.device))\n            _replay_require(self.free_bytes >= REPLAY_MINIMUM_FREE_BYTES, "memory_budget_insufficient")\n            for rank, (start, stop) in enumerate(self.windows):\n                qshard = shard_output = None\n                try:\n                    xshard = source[start:stop]\n                    _replay_require(xshard.is_contiguous(), "input_guard_failed")\n                    qshard = type(qinput).from_float(xshard, qinput._layout_cls, scale=qinput._params.scale)\n                    replay_input = _replay_quantized_identity(qshard, tensor_global_start=start, windows=[(start, stop)])\n                    # _forward is called directly, so replay cannot recurse through the module\'s hooks.\n                    original_weight, original_bias = weight, bias\n                    shard_output = self.original(qshard, original_weight, original_bias)\n                    _replay_require(original_weight is weight and original_bias is bias\n                        and torch.equal(qshard._params.scale, qinput._params.scale), "quantized_guard_failed")\n                    numbers = _replay_compare_outputs(full_output, shard_output, global_start=start, global_stop=stop)\n                    self.replays.append({"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": rank,\n                        "global_start": start, "global_stop": stop, "logical_rows": stop - start,\n                        "padded_rows": replay_input["padded_rows"], "full_logical_rows": self.stop,\n                        "full_padded_rows": inputs["padded_rows"], "input_width": 7168, "output_width": 5376,\n                        "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout", "scale_reused": True,\n                        "weight_object_reused": original_weight is weight, "bias_object_reused": original_bias is bias,\n                        "backend_verified": False, "native_input": inputs["windows"][rank],\n                        "replay_input": replay_input["windows"][0],\n                        "input_match": inputs["windows"][rank] == replay_input["windows"][0], **numbers})\n                finally:\n                    del qshard, shard_output\n        except ProjectionReplayError as exc:\n            self.error_code = exc.args[0]\n        except Exception:\n            self.error_code = "replay_execution_failed"\n\n    def __exit__(self, _kind, _value, _traceback):\n        self.input = None\n        if self.installed:\n            try:\n                _replay_require(self.module._forward is self.wrapped, "hook_restore_failed")\n                if self.previous is _ABSENT:\n                    delattr(self.module, "_forward")\n                else:\n                    self.module._forward = self.previous\n                self.installed = False\n            except Exception:\n                self.error_code = "hook_restore_failed"\n        while self.handles:\n            try:\n                self.handles.pop().remove()\n            except Exception:\n                self.error_code = "hook_restore_failed"\n        return False\n\n    def packet(self):\n        code = self.error_code\n        if code is None and (self.call_count != 1 or self.capture is None or (self.rank == -1 and len(self.replays) != 2)):\n            code = "quantized_capture_failed"\n        status = "complete" if code is None else ("budget_insufficient" if code == "memory_budget_insufficient" else "error")\n        return {"capture": self.capture, "replays": list(self.replays), "status": {\n            "schema_version": 1, "block": 34, "point": "attn.out_proj", "phase": "native" if self.rank == -1 else "sp2",\n            "rank": self.rank, "status": status, "error_code": code, "call_count": self.call_count,\n            "captured": self.capture is not None, "replay_count": len(self.replays), "backend_verified": False,\n            "minimum_free_bytes": REPLAY_MINIMUM_FREE_BYTES, "free_bytes": self.free_bytes,\n            "reserved_bytes": self.reserved_bytes, "allocated_bytes": self.allocated_bytes}}\n\n\ndef projection_replay_summary(packets, native):\n    """Only metadata leaves the hook; incomplete replay never promotes the original parity gate."""\n    actual, replays, statuses = [], [], []\n    records = [packet.get("projection_replay", {}) for packet in [*packets, native]]\n    for record in records:\n        statuses.append(record["status"])\n    reference = records[2].get("capture")\n    if reference is not None:\n        for rank, packet in enumerate(packets):\n            captured = records[rank].get("capture")\n            if captured is None:\n                continue\n            sp_input = captured["input"]["windows"][0]\n            native_input = reference["input"]["windows"][rank]\n            actual.append({"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": rank,\n                "global_start": packet["start"], "global_stop": packet["stop"], "input_width": 7168,\n                "output_width": 5376, "dtype": "torch.bfloat16", "layout": "TensorCoreNVFP4Layout",\n                "sp_padded_rows": captured["input"]["padded_rows"], "native_padded_rows": reference["input"]["padded_rows"],\n                "sp_input": sp_input, "native_input": native_input, "input_match": sp_input == native_input,\n                "sp_weight": captured["weight"], "native_weight": reference["weight"],\n                "weight_match": captured["weight"] == reference["weight"],\n                "sp_bias": captured["bias"], "native_bias": reference["bias"],\n                "bias_match": captured["bias"] == reference["bias"], "backend_verified": False})\n    replays = records[2].get("replays", [])\n    complete = len(actual) == 2 and len(replays) == 2 and all(row["status"] == "complete" for row in statuses)\n    return {"actual": actual, "replays": replays, "statuses": statuses, "complete": complete}\n# END reviewed projection M replay diagnostic\n\n\n', ''), (482, 483, '        self.replay = None\n', ''), (521, 524, '            self.replay = ProjectionReplay(block.attn.out_proj, rank=self.rank, start=self.start,\n                                           stop=self.stop, windows=self.hash_windows)\n            self.replay.__enter__()\n', ''), (545, 547, '        if self.replay is not None:\n            self.replay.__exit__(None, None, None)\n', ''), (563, 565, '                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes,\n                "projection_replay": None if self.replay is None else self.replay.packet()}\n', '                "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes}\n')], 'sp_group.py': [(386, 395, '                        replay_summary = spf.projection_replay_summary(packets, native_trace.packet())\n                        for row in replay_summary["statuses"]:\n                            logging.info("[minimax_sp][projection_replay_status] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                        for row in replay_summary["actual"]:\n                            logging.info("[minimax_sp][projection_actual] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                        for row in replay_summary["replays"]:\n                            logging.info("[minimax_sp][projection_replay] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n                        if not replay_summary["complete"]:\n                            trace_error = "ProjectionReplayIncomplete"\n', '')]}
 PROJECTION_REPLAY_PRIOR_SHA = {'sp_forward.py': '9c9dd6617aa7e392d40d573307a7e00c69fcb32477871f770e81a3cf53db5bcf', 'sp_group.py': 'e17a20698d52f87df9c3712a290f496a5f321eae7091665477a9bbda58f9c2ed'}
 
 def reverse_projection_replay(source, name='sp_forward.py'):
+    source=reverse_full_m(source,name)
     lines=source.splitlines(keepends=True)
     for lo,hi,after,before in reversed(PROJECTION_REPLAY_REVERSE_EDITS[name]):
         if ''.join(lines[lo:hi])!=after:
@@ -461,7 +476,8 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             Block0Trace=Trace,
             block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[]),
             layer_hash_summary=Mock(return_value=[]), projection_hash_summary=Mock(return_value=[]),
-            projection_replay_summary=Mock(return_value={"statuses":[],"actual":[],"replays":[],"complete":True})),
+            projection_replay_summary=Mock(return_value={"statuses":[],"actual":[],"replays":[],"complete":True}),
+            projection_full_m_summary=Mock(return_value=[]), FULL_M_DIAGNOSTIC_PROBE_ONLY=False),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -1788,6 +1804,341 @@ class ProjectionReplayLifecycleTests(_pr_unittest.TestCase):
         self.assertEqual([row["padded_rows"] for row in packet["replays"]], [22592, 22592])
         self.assertEqual([row["full_padded_rows"] for row in packet["replays"]], [45168, 45168])
         self.assert_restored(h)
+
+
+
+
+# Portable unchanged byte-layout fixtures, executing integrated helper AST.
+_FULL_M_LAYOUT_FIXTURE_SOURCE = '"""Independent CPU byte-layout fixtures; no Torch/GPU/media or model loading."""\nimport importlib.util\nimport json\nfrom pathlib import Path\nimport sys\nfrom types import SimpleNamespace\nimport unittest\nfrom unittest.mock import patch\n\nimport numpy as np\n\n\nclass Tensor:\n    def __init__(self, array, dtype="u8", device="fixture-device", requires_grad=False):\n        self.array, self.dtype, self.device = array, dtype, device\n        self.requires_grad = requires_grad\n\n    @property\n    def shape(self):\n        return self.array.shape\n\n    @property\n    def ndim(self):\n        return self.array.ndim\n\n    def numel(self):\n        return self.array.size\n\n    def is_contiguous(self):\n        return self.array.flags.c_contiguous\n\n    def view(self, dtype):\n        assert self.dtype in ("u8", "fp8") and dtype in ("u8", "fp8")\n        return Tensor(self.array, dtype, self.device)\n\n    def reshape(self, *shape):\n        return Tensor(self.array.reshape(*shape), self.dtype, self.device)\n\n    def transpose(self, a, b):\n        return Tensor(self.array.swapaxes(a, b), self.dtype, self.device)\n\n    def permute(self, *axes):\n        return Tensor(self.array.transpose(*axes), self.dtype, self.device)\n\n    def __getitem__(self, key):\n        return Tensor(self.array[key], self.dtype, self.device)\n\n    def __ge__(self, other):\n        return Tensor(self.array >= other, "bool", self.device)\n\n    def all(self):\n        return Tensor(np.asarray(self.array.all()), "bool", self.device)\n\n    def item(self):\n        return self.array.item()\n\n    def copy_(self, source):\n        assert self.dtype == source.dtype and self.device == source.device\n        self.array[...] = source.array\n        return self\n\n    def clone(self, *, memory_format):\n        assert memory_format == "contiguous"\n        return Tensor(self.array.copy(order="C"), self.dtype, self.device)\n\n\nALLOCATIONS = []\n\n\ndef zeros(shape, *, dtype, device):\n    assert dtype == "u8"\n    ALLOCATIONS.append(tuple(shape))\n    return Tensor(np.zeros(shape, dtype=np.uint8), dtype, device)\n\n\nFAKE_TORCH = SimpleNamespace(Tensor=Tensor, uint8="u8", float8_e4m3fn="fp8",\n    float32="f32", bfloat16="bf16", contiguous_format="contiguous", zeros=zeros,\n    isfinite=lambda value: Tensor(np.isfinite(value.array), "bool", value.device))\nimport ast\n_names = {\'_full_m_sizes\',\'nvfp4_full_m_budget\',\'_full_m_unblock_tile\',\'_full_m_block_tile\',\n          \'nvfp4_full_m_zero_pad_storage\',\'nvfp4_full_m_crop_output\'}\n_tree = ast.parse(AFTER.read_text())\n_namespace = {\'torch\': FAKE_TORCH}\nexec(compile(ast.Module(body=[node for node in _tree.body if isinstance(node,ast.FunctionDef)\n    and node.name in _names],type_ignores=[]),str(AFTER),\'exec\'),_namespace)\nhelper=SimpleNamespace(**_namespace)\n\n\ndef blocked_oracle(logical, *, poison=0):\n    """Direct CUDA physical offset equation; independent of reshape/permute helper."""\n    rows, cols = logical.shape\n    padded_rows, padded_cols = (rows + 127) // 128 * 128, (cols + 3) // 4 * 4\n    target = np.full(padded_rows * padded_cols, poison, dtype=np.uint8)\n    r = np.arange(rows, dtype=np.int64)[:, None]\n    c = np.arange(cols, dtype=np.int64)[None, :]\n    index = ((r // 128) * (padded_cols // 4) + c // 4) * 512 + (r % 32) * 16 + ((r % 128) // 32) * 4 + c % 4\n    target[index] = logical\n    return Tensor(target.reshape(padded_rows, padded_cols), "fp8")\n\n\ndef source_fixture(rows, cols, *, scale_value=1.0):\n    packed = np.full(((rows + 15) // 16 * 16, cols // 2), 253, dtype=np.uint8)\n    rr, cc = np.arange(rows)[:, None], np.arange(cols // 2)[None, :]\n    packed[:rows] = ((rr * 17 + cc * 11) % 256).astype(np.uint8)\n    scale_values = ((rr * 31 + np.arange(cols // 16)[None, :] * 7) % 256).astype(np.uint8)\n    return Tensor(packed), blocked_oracle(scale_values, poison=251), Tensor(np.asarray(scale_value, dtype=np.float32), "f32"), scale_values\n\n\nclass FullMPackedStorageTests(unittest.TestCase):\n    def setUp(self):\n        ALLOCATIONS.clear()\n\n    def verify_window(self, *, local_rows, full_rows, cols, start):\n        qdata, scales, scale, logical = source_fixture(local_rows, cols)\n        source_q, source_s = qdata.array.copy(), scales.array.copy()\n        out = helper.nvfp4_full_m_zero_pad_storage(qdata, scales, scale,\n            local_rows=local_rows, full_rows=full_rows, input_cols=cols, global_start=start,\n            allocation_limit_bytes=2**30)\n        expected_q = np.zeros(((full_rows + 15) // 16 * 16, cols // 2), dtype=np.uint8)\n        expected_q[start:start + local_rows] = source_q[:local_rows]\n        expected_s = np.zeros((full_rows, cols // 16), dtype=np.uint8)\n        expected_s[start:start + local_rows] = logical\n        np.testing.assert_array_equal(out["qdata"].array, expected_q)\n        np.testing.assert_array_equal(out["block_scale"].array, blocked_oracle(expected_s).array)\n        np.testing.assert_array_equal(qdata.array, source_q)\n        np.testing.assert_array_equal(scales.array, source_s)\n        self.assertIs(out["scale"], scale)\n        self.assertFalse(out["metadata"]["kernel_or_output_parity_verified"])\n        self.assertFalse(out["metadata"]["source_padding_copied"])\n        json.dumps(out["metadata"], allow_nan=False)\n        # Explicit intermediate allocations remain one scale tile each.\n        self.assertTrue(all(shape == (128, (cols // 16 + 3) // 4 * 4) for shape in ALLOCATIONS[2:]))\n        return out\n\n    def test_unaligned_global_window_reswizzles_and_discards_all_source_padding(self):\n        self.verify_window(local_rows=151, full_rows=289, cols=80, start=31)\n\n    def test_actual_45167_split_for_each_rank_preserves_original_global_rows(self):\n        # Actual M/window boundaries, smaller K; no model-size CPU allocation.\n        for start, count in ((0, 22584), (22584, 22583)):\n            with self.subTest(start=start):\n                ALLOCATIONS.clear()\n                out = self.verify_window(local_rows=count, full_rows=45167, cols=64, start=start)\n                self.assertEqual(out["qdata"].shape, (45168, 32))\n                self.assertEqual(out["block_scale"].shape, (45184, 4))\n\n    def test_invalid_geometry_storage_scale_or_budget_rejects_before_allocation(self):\n        base = dict(local_rows=17, full_rows=48, input_cols=80, global_start=5, allocation_limit_bytes=2**20)\n        changes = [dict(global_start=-1), dict(global_start=32), dict(input_cols=79),\n                   dict(local_rows=True), dict(allocation_limit_bytes=1)]\n        for change in changes:\n            q, s, scale, _ = source_fixture(17, 80)\n            with self.subTest(change=change), self.assertRaises(RuntimeError):\n                helper.nvfp4_full_m_zero_pad_storage(q, s, scale, **{**base, **change})\n        for field, change in (("q", "dtype"), ("q", "shape"), ("s", "device"),\n                              ("s", "noncontiguous"), ("scale", "nan"),\n                              ("scale", "negative"), ("scale", "requires_grad")):\n            q, s, scale, _ = source_fixture(17, 80)\n            if (field, change) == ("q", "dtype"): q.dtype = "fp8"\n            if (field, change) == ("q", "shape"): q.array = q.array[:-1]\n            if (field, change) == ("s", "device"): s.device = "other-device"\n            if (field, change) == ("s", "noncontiguous"): s.array = s.array[:, ::-1]\n            if change == "nan": scale.array[...] = np.nan\n            if change == "negative": scale.array[...] = -1\n            if change == "requires_grad": scale.requires_grad = True\n            with self.subTest(field=field, change=change), self.assertRaises(RuntimeError):\n                helper.nvfp4_full_m_zero_pad_storage(q, s, scale, **base)\n        self.assertEqual(ALLOCATIONS, [])\n\n    def test_zero_scale_object_and_source_bytes_remain_unchanged(self):\n        q, s, scale, _ = source_fixture(17, 64, scale_value=0.0)\n        out = helper.nvfp4_full_m_zero_pad_storage(q, s, scale, local_rows=17, full_rows=33,\n            input_cols=64, global_start=16, allocation_limit_bytes=2**20)\n        self.assertIs(out["scale"], scale)\n        self.assertEqual(scale.item(), 0.0)\n        np.testing.assert_array_equal(out["qdata"].array[16:33], q.array[:17])\n\n    def test_output_crop_keeps_global_position_and_releases_full_storage_by_clone(self):\n        full = Tensor(np.arange(37 * 5, dtype=np.float32).reshape(37, 5), "bf16")\n        expected = full.array[19:37].copy()\n        out = helper.nvfp4_full_m_crop_output(full, full_rows=37, global_start=19, global_stop=37, output_cols=5)\n        self.assertFalse(np.shares_memory(full.array, out.array))\n        full.array[...] = -1\n        np.testing.assert_array_equal(out.array, expected)\n        for change in (dict(global_start=-1), dict(global_stop=38), dict(full_rows=36), dict(output_cols=4)):\n            with self.subTest(change=change), self.assertRaises(RuntimeError):\n                helper.nvfp4_full_m_crop_output(full, **{**dict(full_rows=37, global_start=19, global_stop=37, output_cols=5), **change})\n\n    def test_real_out_projection_budget_is_explicit_calculation_not_measurement(self):\n        budget = helper.nvfp4_full_m_budget(local_rows=22584, full_rows=45167, input_cols=7168,\n                                           global_start=0, output_cols=5376)\n        self.assertEqual(budget["qdata_shape"], [45168, 3584])\n        self.assertEqual(budget["block_scale_shape"], [45184, 448])\n        self.assertEqual(budget["qdata_bytes"], 45168 * 3584)\n        self.assertEqual(budget["full_y_bf16_bytes"], 45168 * 5376 * 2)\n        self.assertEqual(budget["crop_bf16_bytes"], 22584 * 5376 * 2)\n        self.assertEqual(budget["layout_scratch_bound_bytes"], 6 * 128 * 448)\n        self.assertEqual(budget["bf16_full_x_bytes"], 0)\n        self.assertEqual(budget["kind"], "calculated_not_measured")\n        self.assertFalse(budget["measured_peak"])\n        json.dumps(budget, allow_nan=False)\n        self.assertEqual(ALLOCATIONS, [])\n\n'
+_full_m_layout_ns={"AFTER":AFTER,"__file__":__file__}
+exec(compile(_FULL_M_LAYOUT_FIXTURE_SOURCE,"full_m_layout_cpu_fixture","exec"),_full_m_layout_ns)
+FullMPackedStorageTests=_full_m_layout_ns["FullMPackedStorageTests"]
+
+class FullMProbeGateTests(unittest.TestCase):
+    def test_formal_rejected_before_process_group_or_worker_spawn(self):
+        source = ast.parse(GROUP_SOURCE.read_text())
+        group = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "SPGroup")
+        init = next(node for node in group.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+        distributed = Mock()
+        namespace = {"spf": SimpleNamespace(FULL_M_DIAGNOSTIC_PROBE_ONLY=True),
+                     "os": SimpleNamespace(environ={}), "dist": distributed}
+        exec(compile(ast.Module(body=[init], type_ignores=[]), str(GROUP_SOURCE), "exec"), namespace)
+        owner = SimpleNamespace(_start=Mock())
+        with self.assertRaisesRegex(RuntimeError, "formal execution is disabled"):
+            namespace["__init__"](owner, 2, "pinned-model", "default", ["0", "1"])
+        distributed.is_initialized.assert_not_called()
+        owner._start.assert_not_called()
+
+    def test_probe_never_accepts_next_step_even_when_native_parity_passes(self):
+        for passed in (True, False):
+            fixture = parity_fixture(world2_good=passed)
+            fixture.namespace["spf"].FULL_M_DIAGNOSTIC_PROBE_ONLY = True
+            expected = "formal execution remains disabled" if passed else "video differs from native H3"
+            with self.subTest(passed=passed), self.assertRaisesRegex(RuntimeError, expected):
+                fixture.forward(*fixture.args)
+            self.assertEqual(fixture.owner.n_forward, 0)
+            fixture.owner.destroy.assert_called_once_with()
+            self.assertEqual(fixture.events.count(("sp", 2)), 1)
+            self.assertEqual(fixture.events.count(("sp", 1)), 0 if passed else 1)
+            if passed:
+                self.assertIn(("log", "[minimax_sp][full_m_probe_complete] native_parity_pass=1 formal_eligible=0"), fixture.events)
+
+    def test_installation_ballot_rejects_local_or_peer_failure_before_target(self):
+        tree_ = ast.parse(AFTER.read_text())
+        function = next(node for node in tree_.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "full_m_installation_vote")
+        class Flag:
+            def __init__(self, value): self.value = value[0]
+            def item(self): return self.value
+        for local_ready, peer_ready in ((False, True), (True, False), (True, True)):
+            ctx = SimpleNamespace(rank=0, group="owned-group")
+            probe = SimpleNamespace(ctx=ctx, installation_verified=False)
+            trace = SimpleNamespace(errors=[], replay=SimpleNamespace(
+                installed=local_ready, error_code=None, full_m=probe))
+            calls = []
+            def reduce(flag, *, op, group):
+                calls.append((op, group))
+                flag.value = min(flag.value, int(peer_ready))
+            namespace = {"torch": SimpleNamespace(tensor=lambda values, **kw: Flag(values), int32="int32"),
+                         "dist": SimpleNamespace(all_reduce=reduce, ReduceOp=SimpleNamespace(MIN="MIN")),
+                         "logging": Mock()}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), str(AFTER), "exec"), namespace)
+            with self.subTest(local=local_ready, peer=peer_ready):
+                if local_ready and peer_ready:
+                    namespace["full_m_installation_vote"](trace, ctx)
+                    self.assertTrue(probe.installation_verified)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "installation rejected"):
+                        namespace["full_m_installation_vote"](trace, ctx)
+                    self.assertFalse(probe.installation_verified)
+                self.assertEqual(calls, [("MIN", "owned-group")])
+
+
+"""Portable metadata-only tests of actual FullMProjection AST; no GPU or media.
+
+Storage movement/hash interfaces are mocked. The real budget and clone/crop
+helper AST execute against shape-only Tensor fixtures; byte layout has its own
+independent NumPy tests. No NVFP4 numerical/kernel parity is implied.
+"""
+import ast as _fm_ast
+import dataclasses as _fm_dataclasses
+import hashlib as _fm_hashlib
+import json as _fm_json
+from pathlib import Path as _FMPath
+from types import SimpleNamespace as _FMNamespace
+import unittest as _fm_unittest
+import weakref as _fm_weakref
+
+
+def _fm_source_path():
+    here = _FMPath(__file__).resolve()
+    standalone = here.with_name("full_m_core.py")
+    return standalone if standalone.is_file() else here.parents[1] / "custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
+
+
+def _fm_helpers_path():
+    source = _fm_source_path()
+    if source.name == "full_m_core.py":
+        return source.parent.parent / "sp-full-m-helper-draft/nvfp4_full_m_helper.py"
+    return source
+
+
+class _FMStorage:
+    pass
+
+
+class _FMTensor:
+    """Only geometry and storage identity; no element array is allocated."""
+    def __init__(self, shape, *, dtype="torch.bfloat16", origin=0, storage=None):
+        self.shape, self.dtype, self.origin = tuple(shape), dtype, origin
+        self.storage = storage if storage is not None else _FMStorage()
+        self.device = _FMNamespace(type="cuda", index=0)
+        self.requires_grad = False
+
+    def is_contiguous(self):
+        return True
+
+    def __getitem__(self, window):
+        assert isinstance(window, slice) and window.step is None
+        start, stop, _ = window.indices(self.shape[0])
+        return type(self)((stop - start, *self.shape[1:]), dtype=self.dtype,
+                          origin=self.origin + start, storage=self.storage)
+
+    def clone(self, *, memory_format):
+        assert memory_format == "contiguous"
+        return type(self)(self.shape, dtype=self.dtype, origin=self.origin)
+
+
+@_fm_dataclasses.dataclass(frozen=True)
+class _FMParams:
+    orig_shape: tuple
+    orig_dtype: str
+    transposed: bool
+    scale: object
+    block_scale: object
+
+
+class _FMHarness:
+    def __init__(self, *, rank=0, free_bytes=3 * 2**30, original_fails=False,
+                 identity_matches=True, outside_zero=True, peer_votes=(True, True)):
+        self.constructor_calls, self.original_calls, self.storage_calls = [], [], []
+        self.votes, self.logs = [], []
+        self.weight, self.bias, self.scale = object(), object(), object()
+        self.full_output_ref = self.full_storage_ref = self.full_input_ref = None
+        owner = self
+        start, stop = (0, 22584) if rank == 0 else (22584, 45167)
+        self.ctx = _FMNamespace(world=2, rank=rank, start=start, stop=stop, local=stop - start,
+                                seq_len=45167, splits=[22584, 22583], group=object())
+
+        class QT:
+            # Fixed pin constructor signature; no from_float or data conversion.
+            def __init__(self, qdata, layout, params):
+                assert isinstance(layout, str)
+                self._qdata, self._layout_cls, self._params = qdata, layout, params
+                owner.constructor_calls.append((layout, params))
+
+            @classmethod
+            def from_float(cls, *_args, **_kwargs):
+                raise AssertionError("full-M must never requantize")
+
+        self.original_params = _FMParams((self.ctx.local, 7168), "torch.bfloat16", False,
+                                         self.scale, object())
+        self.qinput = QT(_FMTensor(((self.ctx.local + 15) // 16 * 16, 3584), dtype="torch.uint8"),
+                         "TensorCoreNVFP4Layout", self.original_params)
+        self.constructor_calls.clear()
+        def original(qinput, weight, bias):
+            self.original_calls.append((qinput._params.orig_shape, weight, bias))
+            self.full_input_ref = _fm_weakref.ref(qinput)
+            assert weight is self.weight and bias is self.bias
+            assert qinput._params.scale is self.scale
+            if original_fails:
+                raise RuntimeError("fixture_private_error_must_not_be_logged")
+            out = _FMTensor((45167, 5376))
+            self.full_output_ref, self.full_storage_ref = _fm_weakref.ref(out), _fm_weakref.ref(out.storage)
+            return out
+        self.original = original
+        def identity(value, *, tensor_global_start, windows):
+            assert windows == [(start, stop)]
+            full = value._params.orig_shape[0] == 45167
+            assert tensor_global_start == (0 if full else start)
+            checksum = "a" * 64 if identity_matches or not full else "b" * 64
+            return {"shape": list(value._params.orig_shape), "padded_rows": value._qdata.shape[0],
+                    "windows": [{"qdata_sha256": checksum, "block_scale_sha256": "c" * 64,
+                                 "scale_sha256": "d" * 64}]}
+        def storage(qdata, block_scale, scale, **geometry):
+            assert qdata is self.qinput._qdata and block_scale is self.original_params.block_scale
+            assert scale is self.scale
+            self.storage_calls.append(geometry)
+            return {"qdata": _FMTensor((45168, 3584), dtype="torch.uint8"),
+                    "block_scale": object(), "scale": scale}
+        def weight_bias(weight, bias):
+            assert weight is self.weight and bias is self.bias
+            return "e" * 64, "f" * 64
+        def flag(values, *, dtype, device):
+            assert dtype == "int32" and device == "cuda:0" and len(values) == 1
+            result = _FMNamespace(value=values[0])
+            result.item = lambda: result.value
+            return result
+        def reduce(value, *, op, group):
+            assert op == "MIN" and group is self.ctx.group
+            index = len(self.votes)
+            self.votes.append(value.value)
+            value.value = int(bool(value.value) and peer_votes[index])
+        def digest(tensor, *, tensor_global_start, global_start, global_stop):
+            assert (tensor_global_start, global_start, global_stop) == (start, start, stop)
+            assert tensor.origin == start and tensor.shape == (stop - start, 5376)
+            return {"sha256": _fm_hashlib.sha256(f"{start}:{stop}:crop".encode()).hexdigest()}
+        fake_torch = _FMNamespace(Tensor=_FMTensor, bfloat16="torch.bfloat16", int32="int32",
+            contiguous_format="contiguous", tensor=flag, cuda=_FMNamespace(synchronize=lambda _dev: None,
+            mem_get_info=lambda _dev: (free_bytes, 2**35), memory_reserved=lambda _dev: 0,
+            memory_allocated=lambda _dev: 0))
+        namespace = {"torch": fake_torch, "dataclasses": _fm_dataclasses,
+            "dist": _FMNamespace(all_reduce=reduce, ReduceOp=_FMNamespace(MIN="MIN")),
+            "logging": _FMNamespace(info=lambda *args: self.logs.append(args)),
+            "REPLAY_MINIMUM_FREE_BYTES": 2**30,
+            "_replay_quantized_identity": identity, "_replay_weight_bias": weight_bias,
+            "streamed_tensor_sha256": digest, "nvfp4_full_m_zero_pad_storage": storage,
+            "_full_m_outside_zero": lambda *_args: outside_zero}
+        wanted = {"FullMProjection", "projection_full_m_summary", "full_m_installation_vote"}
+        source = _fm_source_path()
+        tree = _fm_ast.parse(source.read_text())
+        nodes = [node for node in tree.body if
+            (isinstance(node, (_fm_ast.ClassDef, _fm_ast.FunctionDef)) and node.name in wanted)
+            or (isinstance(node, _fm_ast.Assign) and any(isinstance(t, _fm_ast.Name)
+                and t.id == "FULL_M_ERROR_CODES" for t in node.targets))]
+        assert {n.name for n in nodes if hasattr(n, "name")} == wanted
+        helpers = _fm_ast.parse(_fm_helpers_path().read_text())
+        helper_names = {"_full_m_sizes", "nvfp4_full_m_budget", "nvfp4_full_m_crop_output"}
+        helper_nodes = [n for n in helpers.body if isinstance(n, _fm_ast.FunctionDef) and n.name in helper_names]
+        assert {n.name for n in helper_nodes} == helper_names
+        exec(compile(_fm_ast.Module(body=helper_nodes + nodes, type_ignores=[]), str(source), "exec"), namespace)
+        self.namespace = namespace
+        self.scope = namespace["FullMProjection"](self.ctx)
+        # Target-operation fixtures begin after the separately tested install vote.
+        self.scope.installation_verified = True
+
+    def run(self):
+        return self.scope.execute(self.original, self.qinput, self.weight, self.bias)
+
+
+class FullMProjectionLifecycleTests(_fm_unittest.TestCase):
+    def test_installation_vote_requires_both_hooks_before_marking_verified(self):
+        for local_ready, peer_ready in ((False, True), (True, False), (True, True)):
+            with self.subTest(local_ready=local_ready, peer_ready=peer_ready):
+                h = _FMHarness(peer_votes=(peer_ready, True))
+                h.scope.installation_verified = False
+                replay = _FMNamespace(full_m=h.scope, installed=local_ready, error_code=None)
+                trace = _FMNamespace(replay=replay, errors=[])
+                vote = h.namespace["full_m_installation_vote"]
+                if local_ready and peer_ready:
+                    vote(trace, h.ctx)
+                    self.assertTrue(h.scope.installation_verified)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "installation rejected"):
+                        vote(trace, h.ctx)
+                    self.assertFalse(h.scope.installation_verified)
+                self.assertEqual(h.votes, [int(local_ready)])
+                self.assertEqual(h.original_calls, [])
+
+    def test_direct_qt_constructor_preserves_scale_and_params_without_requantize(self):
+        h = _FMHarness()
+        crop = h.run()
+        self.assertEqual(len(h.constructor_calls), 1)
+        layout, params = h.constructor_calls[0]
+        self.assertEqual(layout, "TensorCoreNVFP4Layout")
+        self.assertIsNot(params, h.original_params)
+        self.assertEqual(h.original_params.orig_shape, (22584, 7168))
+        self.assertEqual(params.orig_shape, (45167, 7168))
+        self.assertIs(params.scale, h.original_params.scale)
+        self.assertEqual(params.orig_dtype, h.original_params.orig_dtype)
+        self.assertEqual(params.transposed, h.original_params.transposed)
+        self.assertEqual(h.original_calls, [((45167, 7168), h.weight, h.bias)])
+        self.assertEqual(h.votes, [1, 1])
+        self.assertEqual(crop.shape, (22584, 5376))
+
+    def test_rank1_crop_clones_global_window_and_drops_full_y_storage(self):
+        h = _FMHarness(rank=1)
+        crop = h.run()
+        self.assertEqual((crop.origin, crop.shape), (22584, (22583, 5376)))
+        self.assertIsNone(h.full_output_ref())
+        self.assertIsNone(h.full_storage_ref())
+        self.assertIsNone(h.full_input_ref())
+        self.assertEqual(len(h.original_calls), 1)
+        self.assertEqual(h.scope.record["crop_shape"], [22583, 5376])
+        self.assertTrue(h.scope.record["crop_cloned"])
+
+    def test_insufficient_memory_rejects_on_first_ballot_without_any_gemm(self):
+        h = _FMHarness(free_bytes=2**30 - 1)
+        with self.assertRaisesRegex(RuntimeError, "full-M diagnostic rejected"):
+            h.run()
+        self.assertEqual(h.votes, [0])
+        self.assertEqual(h.constructor_calls, [])
+        self.assertEqual(h.original_calls, [])
+        self.assertEqual(h.storage_calls, [])
+        self.assertIsNone(h.scope.record)
+        self.assertEqual(h.logs[0][-1], "full_m_memory_insufficient")
+
+    def test_input_identity_outside_zero_or_peer_failure_never_falls_back(self):
+        for options in (dict(identity_matches=False), dict(outside_zero=False), dict(peer_votes=(False, True))):
+            with self.subTest(options=options):
+                h = _FMHarness(**options)
+                with self.assertRaisesRegex(RuntimeError, "full-M diagnostic rejected"):
+                    h.run()
+                self.assertEqual(h.original_calls, [])
+                self.assertEqual(len(h.votes), 1)
+                self.assertIsNone(h.scope.record)
+
+    def test_gemm_failure_votes_again_and_exposes_only_fixed_error_code(self):
+        h = _FMHarness(original_fails=True)
+        with self.assertRaisesRegex(RuntimeError, "full-M diagnostic rejected"):
+            h.run()
+        self.assertEqual(h.votes, [1, 0])
+        self.assertEqual(len(h.original_calls), 1)
+        self.assertIsNone(h.full_input_ref())
+        self.assertIsNone(h.scope.record)
+        self.assertEqual(h.logs[0][-1], "full_m_execution_failed")
+        self.assertNotIn("fixture_private_error", repr(h.logs))
+
+    def test_json_summary_requires_two_rows_and_rejects_native_intervention(self):
+        packets = []
+        for rank in (0, 1):
+            h = _FMHarness(rank=rank)
+            h.run()
+            row = h.scope.record
+            self.assertEqual(_fm_json.loads(_fm_json.dumps(row, allow_nan=False)), row)
+            self.assertFalse(row["backend_verified"])
+            self.assertFalse(row["native_oracle_changed"])
+            self.assertFalse(row["formal_eligible"])
+            packets.append({"start": h.ctx.start, "stop": h.ctx.stop,
+                "projection_replay": {"full_m": row},
+                "projection_hashes": {"attn.out_proj.post": [{"sha256": row["crop_sha256"]}]}})
+        summary = h.namespace["projection_full_m_summary"]
+        self.assertEqual(len(summary(packets, {"projection_replay": {}})), 2)
+        with self.assertRaisesRegex(RuntimeError, "native_intervention_rejected"):
+            summary(packets, {"projection_replay": {"full_m": packets[0]["projection_replay"]["full_m"]}})
+        packets[0]["projection_hashes"]["attn.out_proj.post"][0]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(RuntimeError, "returned_crop_hash_mismatch"):
+            summary(packets, {"projection_replay": {}})
 
 
 

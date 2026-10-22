@@ -130,3 +130,7 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 第九次GPU诊断确认block34 out_proj的实际NVFP4输入数据、逻辑block scales、动态尺度及cast后的权重/bias哈希均与native一致。native调用内仅余269,746,176字节（约257MiB）物理空闲显存，低于原1GiB保护门槛，两个分片复播均主动跳过；不能据此确认矩阵尺寸是误差原因。旧采样、100条层出口哈希及16条投影哈希仍完整，最终数值门槛仍失败，无SP2视频。
 
 `sp2 --sp-verify`启动现在固定使用原生`--vram-headroom 2.0`，为DynamicVRAM在每张卡额外预留2GiB；字段`diagnostic_vram_headroom_gib=2.0`进入配置指纹及启动/READY回执。worker继承相同值。正式SP2、单卡和仅profile模式不增加headroom；模型、原native oracle、量化及1GiB复播保护均不变。该启动设置已通过CPU测试，目标投影处的实际可用显存及复播结果仍待GPU验证。
+
+第十次GPU诊断使用额外2GiB headroom，目标位置实测空闲2,417,229,824字节，两次同GPU复播成功。rank0的121,411,584元素仅1处不同（绝对差0.5，按原生窗口最大值归一化为3.310381e-5），rank1的121,406,208元素全部一致；两个分片复播结果逐字节重现真实SP输出。相应量化数据、逻辑scales、动态尺度及实际cast W/B一致，证明M尺寸及相关布局变化可以复现首次差异，但未识别具体backend/kernel。最终视频/音频相对误差仍为0.10351562/0.044378698，原门槛未通过。
+
+当前版本是仅用于定位的full-M实验：只在verify首步的block34 out_proj，将各rank已量化的输入放回原始全局行位置，其余行补零，再以原生完整矩阵尺寸计算并clone本rank窗口。原生oracle、权重、精度和1GiB显存门槛保持；记录源local输入与实际full-M执行输入的独立证据。正式SP请求在创建进程组前拒绝；即使首步parity通过，实验也在诊断后主动结束，不继续未修的后续步数，不能据此启动正式速度或质量评测。此full-M修因实验尚待GPU验证。
