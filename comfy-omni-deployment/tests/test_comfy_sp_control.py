@@ -78,6 +78,75 @@ class SPControlTests(unittest.TestCase):
             self.assertIn("--disable-all-custom-nodes", argv)
             self.assertNotIn("--whitelist-custom-nodes", argv)
 
+    def test_verify_only_headroom_is_explicit_fingerprinted_and_formal_unchanged(self):
+        diagnostic = self.launch(sp_verify=True)
+        self.assertEqual(diagnostic["diagnostic_vram_headroom_gib"], 2.0)
+        argv = c.command_arguments(diagnostic)
+        self.assertEqual(argv.count("--vram-headroom"), 1)
+        self.assertEqual(argv[argv.index("--vram-headroom") + 1], "2.0")
+        prior = {key: value for key, value in diagnostic.items() if key != "diagnostic_vram_headroom_gib"}
+        self.assertNotEqual(c.fingerprint(diagnostic), c.fingerprint(prior))
+        for options in ({}, {"sp_profile": True}):
+            formal = self.launch(**options)
+            c.validate_config(formal)
+            self.assertNotIn("diagnostic_vram_headroom_gib", formal)
+            self.assertNotIn("--vram-headroom", c.command_arguments(formal))
+        for slot in ("default", "gpu0", "gpu1"):
+            config = c.configuration(self.root, instance=slot)
+            self.assertNotIn("diagnostic_vram_headroom_gib", config)
+            self.assertNotIn("--vram-headroom", c.command_arguments({**config, "temp_dir": str(self.root / "temp")}))
+
+    def test_headroom_tampering_and_nondiagnostic_injection_fail_validation(self):
+        diagnostic = self.launch(sp_verify=True)
+        for value in (None, 0, 1, 3, "2.0", float("nan")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
+                c.validate_config({**diagnostic, "diagnostic_vram_headroom_gib": value})
+        missing = {key: value for key, value in diagnostic.items() if key != "diagnostic_vram_headroom_gib"}
+        with self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
+            c.validate_config(missing)
+        for value in (None, 0, 2.0):
+            with self.subTest(injected=value), self.assertRaisesRegex(ValueError, "launch_configuration_mismatch"):
+                c.validate_config({**self.launch(), "diagnostic_vram_headroom_gib": value})
+
+    def test_headroom_survives_launch_state_and_sanitized_receipt(self):
+        config = c.configuration(self.root, instance="sp2", sp_verify=True)
+        captured = {}
+        def popen(argv, **kwargs):
+            captured.update(argv=argv, **kwargs)
+            return SimpleNamespace(pid=1234, poll=lambda: None)
+        def identity(pid):
+            return {"uid": os.getuid(), "pgid": pid, "start_ticks": "99",
+                    "cmdline": [arg.encode() for arg in captured["argv"]]}
+        run = Path(config["run_dir"])
+        with patch.object(c, "require_available_slot"), patch.object(c, "check_port"), \
+                patch.object(c, "verify_installation", return_value={}), \
+                patch.object(c.subprocess, "Popen", side_effect=popen), \
+                patch.object(c, "proc_identity", side_effect=identity):
+            result = c.start(config, run)
+        launch = json.loads(Path(result["config"]).read_text())
+        for receipt in (launch, c.read_state(run), c.sanitized(result)):
+            self.assertEqual(receipt["diagnostic_vram_headroom_gib"], 2.0)
+        self.assertEqual(result["fingerprint"], c.fingerprint(config))
+        with patch.object(c, "owned", return_value=True), patch.object(c, "probe", return_value={"status": "READY"}):
+            ready = c.sanitized(c.status(run))
+        self.assertEqual(ready["status"], "READY")
+        self.assertEqual(ready["diagnostic_vram_headroom_gib"], 2.0)
+
+    def test_wrapper_delivers_native_headroom_argv_before_comfy_import(self):
+        config = self.launch(sp_verify=True)
+        path = self.root / "launch.json"
+        path.write_text(json.dumps(config))
+        self.addCleanup(setattr, sys, "argv", sys.argv[:])
+        self.addCleanup(setattr, sys, "path", sys.path[:])
+        observed = []
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}, clear=True), \
+                patch.object(c, "verify_sp_node"), patch.object(worker.os, "chdir"), \
+                patch.object(worker.signal, "signal"), \
+                patch.object(worker.runpy, "run_path", side_effect=lambda *a, **k: observed.append(sys.argv[:])):
+            worker.main(["--config", str(path), "--owner-token", config["owner_token"]])
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][observed[0].index("--vram-headroom") + 1], "2.0")
+
     def test_vendor_inventory_and_changed_source_are_rejected(self):
         package = self.vendor_copy()
         with patch.object(c, "HERE", package / "scripts"):

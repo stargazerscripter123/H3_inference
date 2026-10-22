@@ -132,6 +132,11 @@ def configuration(root: Path, gpu: int | None = None, input_dir: str | None = No
         config.update(single_gpu=False, gpu_ids=[0, 1], parallelism="ulysses-sp2",
                       sp_verify=sp_verify, sp_profile=sp_profile,
                       sp_contract_sha256=sha256(HERE.parent / "sp-node-contract.json"))
+    if instance == "sp2" and sp_verify:
+        # Native DynamicVRAM headroom only for the first-forward diagnostic.
+        # ComfyUI converts this GiB value using 1024**3; replay keeps its own
+        # unchanged 1 GiB physical-free guard inside the original cast context.
+        config["diagnostic_vram_headroom_gib"] = 2.0
     return config
 
 
@@ -140,7 +145,9 @@ def validate_config(config: dict) -> None:
     expected = configuration(root, config["gpu"], config["input_dir"], config["output_dir"],
                              config.get("instance", "default"),
                              sp_verify=config.get("sp_verify", False), sp_profile=config.get("sp_profile", False))
-    if any(config.get(key) != value for key, value in expected.items()):
+    headroom_key = "diagnostic_vram_headroom_gib"
+    if ((headroom_key in config) != (headroom_key in expected)
+            or any(config.get(key) != value for key, value in expected.items())):
         raise ValueError("launch_configuration_mismatch")
     token = config.get("owner_token")
     if token is not None:
@@ -162,6 +169,8 @@ def command_arguments(config: dict) -> list[str]:
     if config.get("instance") == "sp2":
         arguments += ["--base-directory", str(HERE.parent),
                       "--whitelist-custom-nodes", "minimax_sp_pdd"]
+        if config.get("sp_verify") is True:
+            arguments += ["--vram-headroom", str(config["diagnostic_vram_headroom_gib"])]
     return arguments
 
 
@@ -524,6 +533,8 @@ def start(config: dict, run: Path) -> dict:
         state.update(gpu_ids=config["gpu_ids"], parallelism=config["parallelism"],
                      sp_contract_sha256=config["sp_contract_sha256"],
                      sp_verify=config["sp_verify"], sp_profile=config["sp_profile"])
+        if "diagnostic_vram_headroom_gib" in config:
+            state["diagnostic_vram_headroom_gib"] = config["diagnostic_vram_headroom_gib"]
     info = None
     for _ in range(100):
         if process.poll() is not None:
@@ -617,7 +628,7 @@ def sanitized(result: dict) -> dict:
     keys = {"schema_version", "status", "reason", "pid", "pgid", "uid", "start_ticks",
             "fingerprint", "comfy_commit", "comfy_version", "gpu", "port", "input_dir", "output_dir",
             "models_dir", "source", "python", "disable_metadata", "disable_all_custom_nodes",
-            "started_at", "stop_requested_at", "force_requested_at", "readiness_scope", "reused", "instance", "gpu_ids", "parallelism", "sp_contract_sha256", "sp_verify", "sp_profile"}
+            "started_at", "stop_requested_at", "force_requested_at", "readiness_scope", "reused", "instance", "gpu_ids", "parallelism", "sp_contract_sha256", "sp_verify", "sp_profile", "diagnostic_vram_headroom_gib"}
     return {key: value for key, value in result.items() if key in keys}
 
 

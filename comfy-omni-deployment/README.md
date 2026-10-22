@@ -126,3 +126,7 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 第七次GPU诊断取得100条完整层出口哈希：两rank在block 0–33的全部输出字节与native一致，rank0从block34、rank1从block36开始不同；该结果取代仅靠采样推定的首次偏差位置。最终数值仍未通过原门槛，未生成SP2视频。下一诊断将投影定位到block34，增加四个投影输入/输出的16条完整rank窗口哈希；原100层哈希和116组采样保留，使用同一次内部packet gather，不额外运行模型forward。
 
 第八次GPU诊断完整核对block34的八个投影输入/输出：两rank的qkv输入、qkv输出、attention输出全部字节相同；rank0第一次差异出现在attn.out_proj输出，rank1的八个点全部相同。采样行未捕捉到该差异，完整哈希提供了更窄定位。最终原生数值门槛仍未通过。下一诊断仅在原生oracle的block34 out_proj调用内，复用实际量化输入尺度与cast后权重，顺序复播两个真实分片大小；核对量化输入、逻辑block scales、实际权重和完整输出差异。原native结果与门槛保持不变，不额外运行整个模型；该诊断不证明具体CUDA算法，正式路径不启用复播。
+
+第九次GPU诊断确认block34 out_proj的实际NVFP4输入数据、逻辑block scales、动态尺度及cast后的权重/bias哈希均与native一致。native调用内仅余269,746,176字节（约257MiB）物理空闲显存，低于原1GiB保护门槛，两个分片复播均主动跳过；不能据此确认矩阵尺寸是误差原因。旧采样、100条层出口哈希及16条投影哈希仍完整，最终数值门槛仍失败，无SP2视频。
+
+`sp2 --sp-verify`启动现在固定使用原生`--vram-headroom 2.0`，为DynamicVRAM在每张卡额外预留2GiB；字段`diagnostic_vram_headroom_gib=2.0`进入配置指纹及启动/READY回执。worker继承相同值。正式SP2、单卡和仅profile模式不增加headroom；模型、原native oracle、量化及1GiB复播保护均不变。该启动设置已通过CPU测试，目标投影处的实际可用显存及复播结果仍待GPU验证。
