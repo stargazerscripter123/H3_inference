@@ -8,8 +8,8 @@
   "files": {
     "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
     "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
-    "minimax_sp/sp_forward.py": "985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb",
-    "minimax_sp/sp_group.py": "5d081e141d9892d172d0065f6f6fa1acd33259ae8752c165185fe16f1332b801",
+    "minimax_sp/sp_forward.py": "b76f910dfcc7dd65e92dc0b653d4a268bf66f0e931a785b0dd02a1540427d1c9",
+    "minimax_sp/sp_group.py": "c1a92bbcd5b88e78e362c9cb3c57b45c6e54ad306fcc333f626b6d769901694b",
     "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
     "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
@@ -24,10 +24,10 @@
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
   },
   "local_patch": {
-    "id": "omni-sp2-global-amax-all-out-full-m-probe-v11",
+    "id": "omni-sp2-all-out-full-m-full-head-probe-v12",
     "path": "minimax_sp/sp_forward.py",
     "source_sha256": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
-    "patched_sha256": "985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb",
+    "patched_sha256": "b76f910dfcc7dd65e92dc0b653d4a268bf66f0e931a785b0dd02a1540427d1c9",
     "description": "Use the actual returned video/audio tensor width for PDD final all-gather, and use the public all_gather_into_tensor API supported by the installed PyTorch 2.12.0+cu130 runtime. Padding, rank order and float32 gather buffers are unchanged.",
     "changes": [
       "video gather out_dim: dit.final_layer.video_out.out_features -> v_local.shape[-1]",
@@ -41,7 +41,8 @@
       "Verification only: focus projection samples and complete window hashes on block34, retaining all50 layer hashes and the same single packet gather",
       "Verification only: compare actual NVFP4 inputs and cast weights at block34 out_proj, then replay native full-M projection with two actual shard-M windows using the same cast weight/bias and fixed input scale; original native result and gate unchanged",
       "Diagnostic-only first SP2 forward block34 out_proj: preserve native full-M packed layout with original rank row offsets and zero other rows, clone returned rank crop; formal use and continuation beyond the first diagnostic step are rejected.",
-      "Diagnostic-only first SP2 forward: apply packed full-M padding to all50 attn.out_proj using one shared installation ballot and 100 target ballots per rank. Bind every returned crop with an independent module post-hook; native oracle, all other projections and original threshold remain unchanged."
+      "Diagnostic-only first SP2 forward: apply packed full-M padding to all50 attn.out_proj using one shared installation ballot and 100 target ballots per rank. Bind every returned crop with an independent module post-hook; native oracle, all other projections and original threshold remain unchanged.",
+      "Diagnostic-only first SP2 forward: gather complete backbone h in its original BF16 dtype, call the unchanged native FinalLayer with global segments on both ranks, clone old local output windows and use existing final output gathers. Bind gathered input windows to native and SP block49 SHA; retain original native threshold and first-step-only termination."
     ],
     "actual_model_contract": {
       "pdd_steps": 32,
@@ -57,10 +58,10 @@
       "fixed input scales",
       "native quantization rounding order"
     ],
-    "previous_patched_sha256": "efb27d90f0e1ee3491d6e7a65408c1a81728066c33178673288f57ee0d38d659"
+    "previous_patched_sha256": "985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb"
   },
   "validation": {
-    "cpu_shape_and_ast_tests": 87,
+    "cpu_shape_and_ast_tests": 95,
     "gpu_tested": false,
     "full_forward_parity_tested": false,
     "full_forward_parity_passed": false,
@@ -69,7 +70,7 @@
       "threshold": 0.001,
       "formal_outputs": 0
     },
-    "scope": "Block34 full-M intervention eliminated its complete projection difference; remaining first layer differences occur at rank0 block35 and rank1 block36. All50 out_proj full-M experiment awaits GPU validation and remains ineligible for formal generation.",
+    "scope": "All50 out_proj full-M made all100 backbone rank-window hashes identical to native; audio final is exact, video relative remains 0.0029761905. Full final-layer gathered-h diagnostic awaits GPU validation; no formal generation.",
     "previous_global_amax_gpu_result": {
       "video_relative_max": 0.103515625,
       "audio_relative_max": 0.044378698,
@@ -125,13 +126,27 @@
       "world1_audio_max_abs": 0.0,
       "native_parity_passed": false,
       "formal_outputs": 0
+    },
+    "previous_all50_out_full_m_intervention": {
+      "layer_hash_rows": 100,
+      "all_layer_hashes_match": true,
+      "projection_hash_rows": 16,
+      "all_projection_hashes_match": true,
+      "sampled_rows": 116,
+      "all_sampled_errors_zero": true,
+      "video_max_abs": 0.03125,
+      "video_relative": 0.0029761905,
+      "audio_max_abs": 0.0,
+      "audio_relative": 0.0,
+      "native_parity_passed": false,
+      "formal_outputs": 0
     }
   },
-  "scope": "Diagnostic-only all50 out_proj packed full-M experiment. Other projections and native oracle are unchanged. Formal SP use is rejected; even first-step parity success stops without generation.",
+  "scope": "Diagnostic-only all50 out_proj full-M plus gathered-h native FinalLayer experiment. Original native oracle and numerical threshold unchanged; formal use and continuation past first diagnostic step remain rejected.",
   "diagnostic_patch": {
     "path": "minimax_sp/sp_group.py",
     "source_sha256": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
-    "patched_sha256": "5d081e141d9892d172d0065f6f6fa1acd33259ae8752c165185fe16f1332b801",
+    "patched_sha256": "c1a92bbcd5b88e78e362c9cb3c57b45c6e54ad306fcc333f626b6d769901694b",
     "scope": "Verification-only original native gate and failed-parity world1 mirror; full-M diagnostic evidence logged separately. Formal requests are rejected before group creation; after successful first-step parity this diagnostic-only version also stops without generating a video."
   },
   "activation_scale_patch": {
@@ -311,7 +326,7 @@
     "minimum_free_bytes": 1073741824,
     "max_cpu_chunk_bytes": 16777216,
     "backend_verified": false,
-    "gpu_tested": false,
+    "gpu_tested": true,
     "native_oracle_changed": false,
     "limitations": "Uses original bound Linear._forward with same actual cast weight/bias and native input scale; backend and dequantization fallback are not independently proven. M-related execution differences are not proof of a particular CUDA algorithm."
   },
@@ -341,7 +356,7 @@
     "minimum_free_bytes": 1073741824,
     "source_local_and_executed_input_evidence_separate": true,
     "formal_allowed": false,
-    "gpu_tested": false,
+    "gpu_tested": true,
     "limitations": "Same dimensions and unchanged local packed values do not guarantee kernel identity or full-model parity. Timing is diagnostic only.",
     "diagnostic_only_collectives": {
       "installation_ballot_before_blocks": 1,
@@ -407,5 +422,51 @@
       34
     ],
     "returned_output_binding": "Independent actual out_proj module post-hook hash equals cloned crop SHA. Only block34 also binds existing native projection comparison; other out_proj crops are not compared to block residual-output hashes."
+  },
+  "diagnostic_resources": {
+    "vram_headroom_gib": 4.0,
+    "scope": "verify-only SP2 full-head diagnostic",
+    "actual_free_memory_budget_required": true,
+    "formal_default_changed": false
+  },
+  "full_head_diagnostic_probe": {
+    "scope": "verify first SP2 forward only; both ranks execute original native FinalLayer on gathered full h",
+    "world": 2,
+    "rows": 2,
+    "logical_rows": 45167,
+    "padded_rows": 45168,
+    "hidden_width": 5376,
+    "splits": [
+      22584,
+      22583
+    ],
+    "input_dtype": "torch.bfloat16",
+    "output_dtype": "torch.float32",
+    "video_output_width": 96,
+    "audio_output_width": 32,
+    "global_segment_objects_reused": true,
+    "native_oracle_changed": false,
+    "original_numerical_threshold": 0.001,
+    "formal_allowed": false,
+    "gpu_tested": false,
+    "input_binding": "Each rank gathered full-h window SHA must equal both native block49 window and corresponding SP rank block49 exit SHA.",
+    "output": "Call original FinalLayer once per rank with original global segments and t_emb; clone the old rank intersections and use unchanged final FP32 output gathers.",
+    "diagnostic_only_collectives": {
+      "preparation_ballot": 1,
+      "tensor_gather": 1,
+      "execution_ballot": 1,
+      "total_ballots_per_rank": 2
+    },
+    "memory_budget": {
+      "minimum_free_bytes": 1073741824,
+      "reserve_bytes": 268435456,
+      "gather_bytes": 485646336,
+      "send_bytes": 242823168,
+      "modulation_workspace_bytes_per_max_target_row": 64512,
+      "head_weight_bytes": 88080384,
+      "required": "max(1GiB, max(gather+send, gather+modulation+head_weights+full_outputs+local_crops)+reserve)",
+      "actual_raw_free_check_required": true
+    },
+    "limitations": "This changes full FinalLayer execution geometry, including norm/modulation and effective PDD output heads; a pass does not identify an individual CUDA/GEMM algorithm. Communication budget does not prove actual allocator peak."
   }
 }

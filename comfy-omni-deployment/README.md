@@ -137,4 +137,9 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 
 第十一次GPU单点干预确认block34两rank的全部16条投影输入/输出哈希均与native一致，block34层出口也一致；首次完整层出口差异移至rank0 block35、rank1 block36。最终video/audio相对误差为0.10453869/0.039940828，world1镜像仍为0，原门槛未通过。此结果证明block34的单点差异可消除，不能扩展成整条SP2已修复。
 
-当前实验统一在50层的out_proj保持原生M尺寸，qkv/fc投影保留原路径。每rank有50个干预点、共100条记录；独立module post-hook核对实际返回crop的SHA。只有block34具有额外native实际量化输入/权重对照，其他98条只证明source-local值和原全局行位置被保留，不冒称native量化逐位验证；这些crop也不与block残差出口哈希混绑。每rank增加1次共享安装票及100次target准备/执行票，原200次activation amax同步保持。正式生成与首步后的继续执行仍禁止；此all50实验尚未GPU验证，不提供速度结论。
+当前实验统一在50层的out_proj保持原生M尺寸，qkv/fc投影保留原路径。每rank有50个干预点、共100条记录；独立module post-hook核对实际返回crop的SHA。只有block34具有额外native实际量化输入/权重对照，其他98条只证明source-local值和原全局行位置被保留，不冒称native量化逐位验证；这些crop也不与block残差出口哈希混绑。每rank增加1次共享安装票及100次target准备/执行票，原200次activation amax同步保持。正式生成与首步后的继续执行仍禁止；all50实验已完成GPU验证：两rank的100个完整主干层窗口哈希全部与native一致，所有116组采样误差为0；最终audio误差0、video最大绝对误差0.03125/相对误差0.0029761905，仍未通过原0.001门槛，不提供速度结论。
+
+
+下一诊断仅改变最终输出阶段：主干仍双卡SP2，all50 out_proj保持已验证的full-M方案；随后以原BF16 dtype汇总完整h，两rank调用原FinalLayer及原全局video/audio段，再将返回值按原rank窗口裁剪并走既有最终gather。原生oracle、world1镜像、PDD公式与1e-3门槛保持不变；首步实验之后仍主动停止，正式生成关闭。此干预同时覆盖norm/modulation、PDD有效头及其矩阵执行形状，不能单独归因于某个GEMM或CUDA算法。新增通信缓冲及输出头临时内存有实际显存预算检查，分配/执行失败经双rank同步后终止；尚未GPU验证。
+
+完整输出头诊断显式把verify-only的DynamicVRAM headroom从2.0提高到4.0GiB，用于新增完整h和FinalLayer临时量；仍按运行入口实际空闲显存检查保守预算。单卡、双实例、正式SP与profile-only默认不改变。headroom是诊断资源设置，不能作为正式速度或真实空闲显存的证明。

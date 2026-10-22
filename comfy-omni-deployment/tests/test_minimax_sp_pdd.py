@@ -23,10 +23,27 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+# BEGIN full-head provenance
+FULL_HEAD_REVERSE_EDITS = {'sp_forward.py': [(932, 933, '        self.full_head = None\n', ''), (1020, 1022, '                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet(),\n                "full_head": self.full_head}\n', '                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet()}\n'), (1170, 1352, '\n# BEGIN reviewed full-sequence FinalLayer diagnostic\nFULL_HEAD_ERROR_CODES = ("full_head_scope_invalid", "full_head_memory_insufficient",\n                         "full_head_preparation_failed", "full_head_execution_failed", "full_head_peer_rejected")\n\n\ndef full_head_budget(video_seg, audio_seg, ctx):\n    """Conservative allocation model, not an allocator/backend peak guarantee."""\n    widths = (96, 32)\n    segments = (video_seg, audio_seg)\n    rows = [seg[1] - seg[0] for seg in segments]\n    crops = [max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start)) for seg in segments]\n    gather_bytes = 45168 * 5376 * 2\n    send_bytes = 22584 * 5376 * 2\n    modulation_workspace_bytes = max(rows) * 5376 * 12\n    head_weight_bytes = (3072 + 1024) * 5376 * 4\n    output_bytes = sum(n * w * 4 for n, w in zip(rows, widths))\n    crop_bytes = sum(n * w * 4 for n, w in zip(crops, widths))\n    reserve_bytes = 256 * 1024 * 1024\n    # The send buffer is released before the original FinalLayer executes.\n    gather_phase_bytes = gather_bytes + send_bytes\n    head_phase_bytes = (gather_bytes + modulation_workspace_bytes + head_weight_bytes\n                        + output_bytes + crop_bytes)\n    required = max(1024 * 1024 * 1024, max(gather_phase_bytes, head_phase_bytes) + reserve_bytes)\n    return {"gather_bytes": gather_bytes, "send_bytes": send_bytes,\n            "modulation_workspace_bytes": modulation_workspace_bytes, "head_weight_bytes": head_weight_bytes,\n            "output_bytes": output_bytes, "crop_bytes": crop_bytes, "reserve_bytes": reserve_bytes,\n            "gather_phase_bytes": gather_phase_bytes, "head_phase_bytes": head_phase_bytes,\n            "required_free_bytes": required}\n\n\ndef _full_head_vote(ctx, success, phase, code, memory, budget):\n    flag = torch.tensor([int(success)], dtype=torch.int32, device="cuda:0")\n    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)\n    if not bool(flag.item()):\n        if success:\n            code = "full_head_peer_rejected"\n        logging.info("[minimax_sp][full_head_error] %s", json.dumps(\n            {"schema_version": 1, "rank": ctx.rank, "phase": phase, "code": code,\n             "memory": memory, "budget": budget, "formal_eligible": False},\n            sort_keys=True, allow_nan=False))\n        raise RuntimeError("MiniMax SP full-head diagnostic rejected")\n\n\ndef full_head_probe(dit, h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts, ctx):\n    """One exact native FinalLayer call per rank, on original-dtype global h.\n\n    Local preparation errors vote before the data collective. Local hash/head/\n    crop errors vote after it and before the existing output gathers. Collective\n    transport failures still rely on the existing process-group timeout/cleanup.\n    Neither native nor world1 installs or calls this diagnostic helper.\n    """\n    send = gathered = full_h = v_full = a_full = v_local = a_local = None\n    memory = budget = None\n    code = "full_head_scope_invalid"\n    prepared = False\n    try:\n        if (ctx.world != 2 or ctx.rank not in (0, 1) or ctx.seq_len != 45167\n                or list(ctx.splits) != [22584, 22583]\n                or (ctx.start, ctx.stop, ctx.local) != ((0, 22584, 22584) if ctx.rank == 0 else (22584, 45167, 22583))\n                or not isinstance(h, torch.Tensor) or h.dtype != torch.bfloat16\n                or tuple(h.shape) != (ctx.local, 5376) or h.device.type != "cuda" or h.device.index != 0\n                or h.requires_grad or not h.is_contiguous()\n                or sample_sigmas is None):\n            raise RuntimeError("full_head_scope_invalid")\n        for seg in (video_seg, audio_seg):\n            if (len(seg) != 3 or type(seg[0]) is not int or type(seg[1]) is not int\n                    or not 0 <= seg[0] < seg[1] <= ctx.seq_len):\n                raise RuntimeError("full_head_scope_invalid")\n        if (audio_seg[1] != video_seg[0] or video_seg[1] != ctx.seq_len\n                or dit.final_layer.video_dim != 96):\n            raise RuntimeError("full_head_scope_invalid")\n        budget = full_head_budget(video_seg, audio_seg, ctx)\n        free, total = torch.cuda.mem_get_info(h.device)\n        memory = {"free_bytes": int(free), "total_bytes": int(total),\n                  "reserved_bytes": int(torch.cuda.memory_reserved(h.device)),\n                  "allocated_bytes": int(torch.cuda.memory_allocated(h.device))}\n        code = "full_head_memory_insufficient"\n        if free < budget["required_free_bytes"]:\n            raise RuntimeError("full_head_memory_insufficient")\n        code = "full_head_preparation_failed"\n        send = torch.zeros((22584, 5376), dtype=h.dtype, device=h.device)\n        send[:ctx.local].copy_(h)\n        gathered = torch.empty((45168, 5376), dtype=h.dtype, device=h.device)\n        prepared = True\n    except Exception:\n        send = gathered = None\n    _full_head_vote(ctx, prepared, "preparation", code, memory, budget)\n    # Equal-size gather pads only the final global row, never an internal gap.\n    dist.all_gather_into_tensor(gathered, send, group=ctx.group)\n    send = None\n    complete = False\n    record = None\n    try:\n        full_h = gathered[:45167]\n        windows = [streamed_tensor_sha256(full_h, tensor_global_start=0,\n                   global_start=start, global_stop=stop) for start, stop in ((0, 22584), (22584, 45167))]\n        # Pass the original objects, including scalar/per-token modulation rows.\n        v_full, a_full = dit.final_layer(full_h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts)\n        full_outputs = (v_full, a_full)\n        for output, seg, width in zip(full_outputs, (video_seg, audio_seg), (96, 32)):\n            if (not isinstance(output, torch.Tensor) or output.dtype != torch.float32\n                    or tuple(output.shape) != (seg[1] - seg[0], width)\n                    or output.device != h.device or output.requires_grad):\n                raise RuntimeError("full_head_execution_failed")\n        del output\n        def crop(output, seg):\n            lo, hi = max(seg[0], ctx.start), min(seg[1], ctx.stop)\n            if hi <= lo:\n                return output[:0].clone(memory_format=torch.contiguous_format)\n            return output[lo - seg[0]:hi - seg[0]].clone(memory_format=torch.contiguous_format)\n        v_local, a_local = crop(v_full, video_seg), crop(a_full, audio_seg)\n        record = {"schema_version": 1, "rank": ctx.rank, "world": 2,\n            "scope": "verify_first_forward_full_final_layer", "applied": True, "call_count": 1,\n            "input_dtype": str(h.dtype), "input_shape": [45167, 5376], "padded_shape": [45168, 5376],\n            "splits": list(ctx.splits), "source_window": [ctx.start, ctx.stop],\n            "global_segments": {"video": list(video_seg[:2]), "audio": list(audio_seg[:2])},\n            "segment_row_objects_reused": True, "t_emb_object_reused": True,\n            "full_h_windows": windows,\n            "full_output_shapes": {"video": list(v_full.shape), "audio": list(a_full.shape)},\n            "local_output_shapes": {"video": list(v_local.shape), "audio": list(a_local.shape)},\n            "output_dtype": str(v_full.dtype), "memory": memory, "budget": budget,\n            "preparation_ballot_count": 1, "execution_ballot_count": 1, "total_ballot_count": 2,\n            "tensor_gather_count": 1, "formal_eligible": False, "native_oracle_changed": False}\n        complete = True\n    except Exception:\n        v_local = a_local = None\n    finally:\n        # The returned clones do not retain full-h/full-output storage.\n        send = gathered = full_h = v_full = a_full = None\n        full_outputs = None\n    _full_head_vote(ctx, complete, "execution", "full_head_execution_failed", memory, budget)\n    return v_local, a_local, record\n\n\ndef full_head_summary(packets, native):\n    if native.get("full_head") is not None or not isinstance(packets, list) or len(packets) != 2:\n        raise RuntimeError("full_head_packet_invalid")\n    records = []\n    for rank, packet in enumerate(packets):\n        row = packet.get("full_head")\n        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("world") != 2\n                or row.get("schema_version") != 1 or row.get("scope") != "verify_first_forward_full_final_layer"\n                or row.get("applied") is not True or row.get("call_count") != 1\n                or row.get("input_dtype") != "torch.bfloat16" or row.get("input_shape") != [45167, 5376]\n                or row.get("padded_shape") != [45168, 5376] or row.get("splits") != [22584, 22583]\n                or row.get("source_window") != [packet["start"], packet["stop"]]\n                or row.get("segment_row_objects_reused") is not True or row.get("t_emb_object_reused") is not True\n                or row.get("output_dtype") != "torch.float32" or row.get("formal_eligible") is not False\n                or row.get("native_oracle_changed") is not False\n                or [row.get(k) for k in ("preparation_ballot_count", "execution_ballot_count", "total_ballot_count", "tensor_gather_count")] != [1, 1, 2, 1]):\n            raise RuntimeError("full_head_packet_invalid")\n        windows = row.get("full_h_windows")\n        if (not isinstance(windows, list) or len(windows) != 2\n                or windows != native["full_hashes"]["block49.post"]\n                or any(windows[r] != packets[r]["full_hashes"]["block49.post"][0] for r in range(2))):\n            raise RuntimeError("full_head_input_hash_mismatch")\n        # Recompute sizes/guard from the recorded global target segments.\n        ctx = types.SimpleNamespace(start=packet["start"], stop=packet["stop"])\n        segments = row.get("global_segments", {})\n        video, audio = segments.get("video", []), segments.get("audio", [])\n        if (set(segments) != {"video", "audio"} or any(len(seg) != 2 or any(type(n) is not int for n in seg)\n                or not 0 <= seg[0] < seg[1] <= 45167 for seg in (video, audio))\n                or audio[1] != video[0] or video[1] != 45167):\n            raise RuntimeError("full_head_segment_invalid")\n        if row.get("budget") != full_head_budget(video, audio, ctx):\n            raise RuntimeError("full_head_budget_invalid")\n        memory = row.get("memory")\n        if (not isinstance(memory, dict) or set(memory) != {"free_bytes", "total_bytes", "reserved_bytes", "allocated_bytes"}\n                or any(type(value) is not int or value < 0 for value in memory.values())\n                or not row["budget"]["required_free_bytes"] <= memory["free_bytes"] <= memory["total_bytes"]):\n            raise RuntimeError("full_head_memory_invalid")\n        for name, seg, width in (("video", video, 96), ("audio", audio, 32)):\n            local_rows = max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start))\n            if (row.get("full_output_shapes", {}).get(name) != [seg[1] - seg[0], width]\n                    or row.get("local_output_shapes", {}).get(name) != [local_rows, width]):\n                raise RuntimeError("full_head_output_shape_invalid")\n        records.append(row)\n    if records[0]["global_segments"] != records[1]["global_segments"]:\n        raise RuntimeError("full_head_segment_invalid")\n    return records\n# END reviewed full-sequence FinalLayer diagnostic\n', ''), (1900, 1906, '        if trace is not None:\n            v_local, a_local, trace.full_head = full_head_probe(dit, h, t_emb, video_seg, audio_seg,\n                sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a), ctx)\n        else:\n            v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),\n                                              sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))\n', '        v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),\n                                          sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))\n')], 'sp_group.py': [(401, 404, '                        full_heads = spf.full_head_summary(packets, native_trace.packet())\n                        for row in full_heads:\n                            logging.info("[minimax_sp][full_head] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
+FULL_HEAD_PRIOR_SHA = {'sp_forward.py': '985b0c56a695a5ea54d9fae19f4a46d9a825bb2f3d1210f9e02451528d2d2adb', 'sp_group.py': '5d081e141d9892d172d0065f6f6fa1acd33259ae8752c165185fe16f1332b801'}
+
+def reverse_full_head(source, name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(FULL_HEAD_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('full-head reviewed block digest/source changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=FULL_HEAD_PRIOR_SHA[name]:
+        raise AssertionError('full-head reviewed block digest differs from all-out full-M source')
+    return source
+# END full-head provenance
+
 ALL_OUT_FULL_M_REVERSE_EDITS = {'sp_forward.py': [(396, 401, '    scope = getattr(trace, "all_out_full_m", None)\n    try:\n        ready = not trace.errors and scope is not None and scope.ctx is ctx and scope.ready()\n    except Exception:\n        ready = False\n', '    replay = getattr(trace, "replay", None)\n    probe = getattr(replay, "full_m", None)\n    ready = (not trace.errors and replay is not None and replay.installed\n             and replay.error_code is None and probe is not None and probe.ctx is ctx)\n'), (403, 405, '    if scope is not None:\n        scope.installation_ballot_count += 1\n', ''), (408, 410, '    for probe in scope.probes.values():\n        probe.installation_verified = True\n', '    probe.installation_verified = True\n'), (443, 444, '    def __init__(self, ctx, block=34):\n', '    def __init__(self, ctx):\n'), (445, 446, '        self.block = block\n', ''), (470, 471, '                        or type(self.block) is not int or self.block not in range(50)\n', ''), (514, 517, '                self.record = {"schema_version": 1, "block": self.block, "point": "attn.out_proj", "rank": ctx.rank,\n                    "scope": "verify_first_forward_all_out_proj", "applied": True, "call_count": self.calls,\n                    "native_quant_comparison_available": self.block == 34,\n', '                self.record = {"schema_version": 1, "block": 34, "point": "attn.out_proj", "rank": ctx.rank,\n                    "scope": "verify_first_forward_only", "applied": True, "call_count": self.calls,\n'), (542, 658, 'class AllOutFullM:\n    """Verify-only ownership of 50 out_proj probes; block34 shares Replay\'s wrapper.\n\n    Post hashes observe each actual module return before residual updates. They\n    never stand in for a block-exit hash or a native quantization comparison.\n    """\n    def __init__(self, dit, ctx, replay):\n        self.dit, self.ctx, self.replay = dit, ctx, replay\n        self.probes = {index: FullMProjection(ctx, block=index) for index in range(50)}\n        self.probes[34] = replay.full_m\n        self.wrappers, self.handles, self.post_hashes = {}, [], {}\n        self.errors = []\n        self.installed = False\n        self.entered = False\n        self.installation_ballot_count = 0\n\n    def __enter__(self):\n        if self.entered:\n            raise RuntimeError("full_m_scope_reentry")\n        self.entered = True\n        try:\n            if (len(self.dit.blocks) != 50 or self.ctx.world != 2 or self.ctx.rank not in (0, 1)\n                    or self.replay.module is not self.dit.blocks[34].attn.out_proj\n                    or not self.replay.installed or self.replay.error_code is not None\n                    or self.replay.full_m is None):\n                raise RuntimeError("full_m_scope_invalid")\n            self.thread = threading.get_ident()\n            for index, block in enumerate(self.dit.blocks):\n                module = block.attn.out_proj\n                if (module.in_features != 7168 or module.out_features != 5376\n                        or getattr(module, "pre_quant_scale", None) is not None\n                        or getattr(module, "input_scale", None) is not None\n                        or getattr(module, "quant_format", None) != "nvfp4"\n                        or getattr(module, "layout_type", None) != "TensorCoreNVFP4Layout"\n                        or getattr(module, "_full_precision_mm", False)\n                        or getattr(module, "comfy_force_cast_weights", False)\n                        or getattr(module, "weight_function", ()) or getattr(module, "bias_function", ())):\n                    raise RuntimeError("full_m_scope_invalid")\n                if index != 34:\n                    previous = vars(module).get("_forward", _ABSENT)\n                    original = module._forward\n                    probe = self.probes[index]\n                    def wrapped(qinput, weight, bias, target=probe, saved=original):\n                        # No BF16 input or cast-weight lifetime is extended. The\n                        # enclosing Linear.forward still owns its cast context.\n                        return target.execute(saved, qinput, weight, bias)\n                    self.wrappers[index] = (module, previous, wrapped)\n                    module._forward = wrapped\n                def post(_module, _inputs, output, target=index):\n                    self._capture_post(target, output)\n                self.handles.append(module.register_forward_hook(post))\n            self.installed = True\n        except Exception:\n            self.errors.append("full_m_scope_install_failed")\n            self.__exit__(None, None, None)\n        return self\n\n    def ready(self):\n        return (self.installed and not self.errors and len(self.handles) == 50\n                and set(self.probes) == set(range(50)) and set(self.wrappers) == set(range(50)) - {34}\n                and self.replay.installed and self.replay.error_code is None\n                and self.replay.module._forward is self.replay.wrapped\n                and self.replay.full_m is self.probes[34]\n                and all(probe.ctx is self.ctx and probe.block == index\n                        for index, probe in self.probes.items())\n                and all(module._forward is wrapped for module, _previous, wrapped in self.wrappers.values()))\n\n    def _capture_post(self, block, output):\n        try:\n            if (threading.get_ident() != self.thread or block in self.post_hashes\n                    or self.probes[block].record is None\n                    or list(output.shape) != [self.ctx.local, 5376]):\n                raise RuntimeError("full_m_post_capture_invalid")\n            digest = streamed_tensor_sha256(output, tensor_global_start=self.ctx.start,\n                global_start=self.ctx.start, global_stop=self.ctx.stop)["sha256"]\n            if digest != self.probes[block].record["crop_sha256"]:\n                raise RuntimeError("full_m_post_crop_mismatch")\n            self.post_hashes[block] = digest\n            self.probes[block].record["returned_post_hook_sha256"] = digest\n        except Exception:\n            self.errors.append("full_m_post_capture_invalid")\n\n    def __exit__(self, _kind, _value, _traceback):\n        # Restore only wrappers installed by this scope; block34 belongs to the\n        # existing Replay owner and is restored by that owner\'s finally path.\n        for module, previous, wrapped in reversed(list(self.wrappers.values())):\n            try:\n                if module._forward is not wrapped:\n                    raise RuntimeError("full_m_scope_restore_failed")\n                if previous is _ABSENT:\n                    delattr(module, "_forward")\n                else:\n                    module._forward = previous\n            except Exception:\n                self.errors.append("full_m_scope_restore_failed")\n        self.wrappers.clear()\n        while self.handles:\n            try:\n                self.handles.pop().remove()\n            except Exception:\n                self.errors.append("full_m_scope_restore_failed")\n        self.installed = False\n        return False\n\n    def packet(self):\n        return {"records": [self.probes[index].record for index in range(50)],\n                "post_hashes": dict(self.post_hashes), "errors": list(self.errors),\n                "scope": {"schema_version": 1, "rank": self.ctx.rank, "target_count": len(self.probes),\n                    "applied_count": sum(probe.record is not None for probe in self.probes.values()),\n                    "installation_ballot_count": self.installation_ballot_count,\n                    "target_ballot_count": sum(probe.ballots for probe in self.probes.values()),\n                    "total_ballot_count": self.installation_ballot_count + sum(probe.ballots for probe in self.probes.values()),\n                    "scope": "verify_first_forward_all_out_proj", "formal_eligible": False,\n                    "native_oracle_changed": False}}\n\n\n', ''), (660, 661, '    if native.get("all_out_full_m") is not None or native.get("projection_replay", {}).get("full_m") is not None:\n', '    if native.get("projection_replay", {}).get("full_m") is not None:\n'), (662, 664, '    if not isinstance(packets, list) or len(packets) != 2:\n        raise RuntimeError("full_m_diagnostic_packet_incomplete")\n', ''), (665, 668, '        scope = packet.get("all_out_full_m")\n        if (not isinstance(scope, dict) or scope.get("errors") or len(scope.get("records", [])) != 50\n                or set(scope.get("post_hashes", {})) != set(range(50))):\n', '        row = packet.get("projection_replay", {}).get("full_m")\n        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("applied") is not True\n                or row.get("scope") != "verify_first_forward_only" or row.get("call_count") != 1\n                or row.get("ballot_count") != 2 or row.get("formal_eligible") is not False\n                or row.get("installation_ballot_count") != 1\n                or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]\n                or row.get("source_local_input") != row.get("executed_retained_input")\n                or row.get("outside_window_zero") is not True):\n'), (669, 700, '        for block, row in enumerate(scope["records"]):\n            if (not isinstance(row, dict) or row.get("rank") != rank or row.get("block") != block\n                    or row.get("applied") is not True or row.get("scope") != "verify_first_forward_all_out_proj"\n                    or row.get("call_count") != 1 or row.get("ballot_count") != 2\n                    or row.get("formal_eligible") is not False or row.get("installation_ballot_count") != 1\n                    or row.get("native_quant_comparison_available") is not (block == 34)\n                    or row.get("global_start") != packet["start"] or row.get("global_stop") != packet["stop"]\n                    or row.get("source_local_input") != row.get("executed_retained_input")\n                    or row.get("outside_window_zero") is not True):\n                raise RuntimeError("full_m_diagnostic_packet_incomplete")\n            digest = scope["post_hashes"][block]\n            if row.get("crop_sha256") != digest or row.get("returned_post_hook_sha256") != digest:\n                raise RuntimeError("full_m_returned_crop_hash_mismatch")\n            if block == 34 and (row != packet["projection_replay"]["full_m"]\n                    or digest != packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]):\n                raise RuntimeError("full_m_returned_crop_hash_mismatch")\n            rows.append(row)\n    return rows\n\n\ndef projection_full_m_scope_summary(packets, native):\n    # Revalidate all per-target evidence before describing aggregate coverage.\n    projection_full_m_summary(packets, native)\n    rows = []\n    for rank, packet in enumerate(packets):\n        row = packet["all_out_full_m"].get("scope")\n        expected = {"schema_version": 1, "rank": rank, "target_count": 50, "applied_count": 50,\n            "installation_ballot_count": 1, "target_ballot_count": 100, "total_ballot_count": 101,\n            "scope": "verify_first_forward_all_out_proj", "formal_eligible": False, "native_oracle_changed": False}\n        if row != expected:\n            raise RuntimeError("full_m_scope_count_invalid")\n', '        digest = packet["projection_hashes"]["attn.out_proj.post"][0]["sha256"]\n        if row.get("crop_sha256") != digest:\n            raise RuntimeError("full_m_returned_crop_hash_mismatch")\n'), (702, 703, '\n', ''), (911, 912, '    """Diagnostic CPU samples, plus SP-only full-M probes on all 50 out_proj modules.\n', '    """Diagnostic CPU samples, plus an explicit SP-only block34 full-M probe.\n'), (931, 932, '        self.all_out_full_m = None\n', ''), (973, 976, '            if self.sp_ctx is not None:\n                self.all_out_full_m = AllOutFullM(self.dit, self.sp_ctx, self.replay)\n                self.all_out_full_m.__enter__()\n', ''), (997, 999, '        if self.all_out_full_m is not None:\n            self.all_out_full_m.__exit__(None, None, None)\n', ''), (1018, 1020, '                "projection_replay": None if self.replay is None else self.replay.packet(),\n                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet()}\n', '                "projection_replay": None if self.replay is None else self.replay.packet()}\n')], 'sp_group.py': [(398, 401, '                        full_m_scopes = spf.projection_full_m_scope_summary(packets, native_trace.packet())\n                        for row in full_m_scopes:\n                            logging.info("[minimax_sp][projection_full_m_scope] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
 ALL_OUT_FULL_M_PRIOR_SHA = {'sp_forward.py': 'efb27d90f0e1ee3491d6e7a65408c1a81728066c33178673288f57ee0d38d659', 'sp_group.py': '192dbbff6f74d35a28c494d33ecb492f837687cb8401b896d04f07c4ce7601c9'}
 
 def reverse_all_out_full_m(source, name='sp_forward.py'):
+    source=reverse_full_head(source,name)
     lines=source.splitlines(keepends=True)
     for lo,hi,after,before in reversed(ALL_OUT_FULL_M_REVERSE_EDITS[name]):
         if ''.join(lines[lo:hi])!=after:
@@ -492,7 +509,7 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[]),
             layer_hash_summary=Mock(return_value=[]), projection_hash_summary=Mock(return_value=[]),
             projection_replay_summary=Mock(return_value={"statuses":[],"actual":[],"replays":[],"complete":True}),
-            projection_full_m_summary=Mock(return_value=[]), projection_full_m_scope_summary=Mock(return_value=[]), FULL_M_DIAGNOSTIC_PROBE_ONLY=False),
+            projection_full_m_summary=Mock(return_value=[]), projection_full_m_scope_summary=Mock(return_value=[]), full_head_summary=Mock(return_value=[]), FULL_M_DIAGNOSTIC_PROBE_ONLY=False),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -2438,6 +2455,279 @@ class AllOutFullMScopeTests(_ao_unittest.TestCase):
                 h.scope.__enter__()
             self.assertTrue(h.scope.ready())
         self.assert_restored(h)
+
+
+
+class FullHeadIntegrationTests(unittest.TestCase):
+    def test_only_trace_world2_branch_enters_full_head_and_original_output_gathers_remain(self):
+        source = ast.parse(AFTER.read_text())
+        forward = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == 'sp_forward')
+        calls = [n for n in ast.walk(forward) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == 'full_head_probe']
+        self.assertEqual(len(calls), 1)
+        branch = next(n for n in ast.walk(forward) if isinstance(n, ast.If) and calls[0] in list(ast.walk(ast.Module(body=n.body,type_ignores=[]))))
+        self.assertEqual(ast.unparse(branch.test), 'trace is not None')
+        self.assertEqual(len(branch.orelse), 1)
+        self.assertIn('dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg)', ast.unparse(branch.orelse[0]))
+        gathers = [n for n in ast.walk(forward) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                   and n.func.id == '_gather_rows']
+        self.assertEqual(len(gathers), 2)
+        self.assertTrue(all(ast.unparse(n.args[0]) in ('v_local','a_local') for n in gathers))
+        assignment = next(n for n in ast.walk(forward) if isinstance(n, ast.Assign)
+                          and any(isinstance(t,ast.Name) and t.id=='trace' for t in n.targets))
+        self.assertEqual(ast.unparse(assignment.value.test), 'ctx.world == 2 and transformer_options.get(BLOCK0_TRACE_REQUEST) is True')
+        for name in ('sp_forward.py','sp_group.py'):
+            previous=reverse_full_head((AFTER.parent/name).read_text(), name)
+            self.assertEqual(hashlib.sha256(previous.encode()).hexdigest(), FULL_HEAD_PRIOR_SHA[name])
+
+    def test_full_head_integrity_failure_cannot_accept_passed_parity(self):
+        fixture=parity_fixture(world2_good=True,profile=True)
+        fixture.namespace['spf'].FULL_M_DIAGNOSTIC_PROBE_ONLY=True
+        fixture.namespace['spf'].full_head_summary.side_effect=RuntimeError('fixed_metadata_error')
+        with self.assertRaisesRegex(RuntimeError,'diagnostic evidence incomplete'):
+            fixture.forward(*fixture.args)
+        fixture.owner.destroy.assert_called_once_with()
+        self.assertEqual(fixture.owner.n_forward,0)
+        self.assertNotIn(('sp',1),fixture.events)
+        self.assertFalse(any(isinstance(e,tuple) and e[0]=='log' and '[full_m_probe_complete]' in e[1]
+                             for e in fixture.events))
+
+    def test_full_head_metadata_errors_still_preserve_failed_native_mirror(self):
+        fixture=parity_fixture(world2_good=False,profile=True)
+        fixture.namespace['spf'].full_head_summary.side_effect=RuntimeError('fixed_metadata_error')
+        with self.assertRaisesRegex(RuntimeError,'video differs from native H3'):
+            fixture.forward(*fixture.args)
+        self.assertEqual(fixture.events.count(('sp',1)),1)
+        self.assertEqual(fixture.owner.n_forward,0)
+        fixture.owner.destroy.assert_called_once_with()
+
+
+"""Portable actual-AST CPU fixtures for the full-sequence FinalLayer probe.
+
+Tensors carry one integer row ID per logical row, not feature arrays or model
+values. These verify geometry, dtype routing, lifecycle and fail-closed votes;
+they make no numerical/CUDA/backend/quality claim.
+"""
+import ast as _fh_ast
+import copy as _fh_copy
+import hashlib as _fh_hashlib
+import json as _fh_json
+from pathlib import Path as _FHPath
+from types import SimpleNamespace as _FHNamespace
+import unittest as _fh_unittest
+import weakref as _fh_weakref
+
+
+def _fh_source():
+    here = _FHPath(__file__).resolve()
+    standalone = here.parent / "comfy-omni-deployment/custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
+    return standalone if standalone.is_file() else here.parents[1] / "custom_nodes/minimax_sp_pdd/minimax_sp/sp_forward.py"
+
+
+class _FHStorage:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+
+class _FHTensor:
+    def __init__(self, shape, dtype, *, values=None, storage=None, offset=0, device=None):
+        self.shape, self.dtype, self.offset = tuple(shape), dtype, offset
+        self.storage = storage if storage is not None else _FHStorage(values if values is not None else [0] * shape[0])
+        self.device = device or _FHNamespace(type="cuda", index=0)
+        self.requires_grad = False
+
+    def is_contiguous(self):
+        return True
+
+    @property
+    def rows(self):
+        return self.storage.rows[self.offset:self.offset + self.shape[0]]
+
+    def __getitem__(self, item):
+        assert isinstance(item, slice) and item.step is None
+        start, stop, _ = item.indices(self.shape[0])
+        return type(self)((stop-start, self.shape[1]), self.dtype, storage=self.storage,
+            offset=self.offset+start, device=self.device)
+
+    def copy_(self, source):
+        assert self.shape == source.shape and self.dtype == source.dtype
+        self.storage.rows[self.offset:self.offset+self.shape[0]] = source.rows
+        return self
+
+    def clone(self, *, memory_format):
+        assert memory_format == "contiguous"
+        return type(self)(self.shape, self.dtype, values=self.rows, device=self.device)
+
+
+def _fh_digest(tensor, *, tensor_global_start, global_start, global_stop):
+    lo, hi = global_start-tensor_global_start, global_stop-tensor_global_start
+    assert 0 <= lo < hi <= tensor.shape[0]
+    values = tensor.rows[lo:hi]
+    return {"dtype": tensor.dtype, "shape": [hi-lo, tensor.shape[1]],
+        "global_start": global_start, "global_stop": global_stop,
+        "sha256": _fh_hashlib.sha256(_fh_json.dumps(values, separators=(",", ":")).encode()).hexdigest()}
+
+
+class _FHHarness:
+    def __init__(self, *, rank=0, free_bytes=6*2**30, peer_votes=(True, True),
+                 allocation_failure=None, head_failure=False, bad_output=False, hash_failure=False):
+        start, stop = (0, 22584) if rank == 0 else (22584, 45167)
+        self.ctx = _FHNamespace(world=2, rank=rank, seq_len=45167, splits=[22584,22583],
+            start=start, stop=stop, local=stop-start, group=object())
+        self.h = _FHTensor((stop-start,5376), "torch.bfloat16", values=range(start+1,stop+1))
+        self.video_row, self.audio_row = object(), object()
+        self.video_seg, self.audio_seg = (9500,45167,self.video_row), (8000,9500,self.audio_row)
+        self.t_emb, self.sigma, self.sigmas, self.shifts = object(), object(), object(), (12.0,3.0)
+        self.votes, self.logs, self.allocations = [], [], []
+        self.gather_calls = self.head_calls = 0
+        self.buffer_refs, self.full_output_refs = [], []
+        self.full_h_ref = None
+        owner = self
+
+        def allocate(shape, *, dtype, device):
+            self.allocations.append((tuple(shape),dtype))
+            if len(self.allocations) == allocation_failure:
+                raise MemoryError("fixture allocation failure")
+            value = _FHTensor(shape, dtype, device=device)
+            self.buffer_refs.append(_fh_weakref.ref(value.storage))
+            return value
+
+        class Head:
+            video_dim = 96
+            def __call__(self, full_h, t_emb, video_seg, audio_seg, sigma, sigmas, shifts):
+                owner.head_calls += 1
+                assert full_h.shape == (45167,5376) and full_h.dtype == "torch.bfloat16"
+                assert full_h.rows == list(range(1,45168))  # No inter-rank gap or padding row.
+                assert t_emb is owner.t_emb and video_seg is owner.video_seg and audio_seg is owner.audio_seg
+                assert video_seg[2] is owner.video_row and audio_seg[2] is owner.audio_row
+                assert sigma is owner.sigma and sigmas is owner.sigmas and shifts is owner.shifts
+                # The send buffer must already be released before head scratch.
+                assert owner.buffer_refs[0]() is None
+                owner.full_h_ref = _fh_weakref.ref(full_h)
+                if head_failure:
+                    raise RuntimeError("private_head_exception_must_not_escape")
+                outputs=[]
+                for seg,width in ((video_seg,96),(audio_seg,32)):
+                    output=_FHTensor((seg[1]-seg[0],width),
+                        "torch.bfloat16" if bad_output else "torch.float32",
+                        values=range(seg[0]+1,seg[1]+1),device=full_h.device)
+                    owner.full_output_refs.append(_fh_weakref.ref(output.storage)); outputs.append(output)
+                return tuple(outputs)
+
+        def flag(values, *, dtype, device):
+            assert dtype == "int32" and device == "cuda:0"
+            cell=_FHNamespace(value=values[0]); cell.item=lambda:cell.value
+            return cell
+        def reduce(cell, *, op, group):
+            assert op=="MIN" and group is self.ctx.group
+            index=len(self.votes); self.votes.append(cell.value)
+            cell.value=int(bool(cell.value) and peer_votes[index])
+        def gather(output, local, *, group):
+            assert group is self.ctx.group
+            assert output.dtype == local.dtype == self.h.dtype == "torch.bfloat16"
+            assert local.shape == (22584,5376) and output.shape == (45168,5376)
+            self.gather_calls += 1
+            expected=list(range(start+1,stop+1))+([0] if rank==1 else [])
+            assert local.rows == expected
+            # One fake peer's contiguous shard, plus only the final padding row.
+            output.storage.rows[:] = list(range(1,45168))+[0]
+        def digest(*args,**kwargs):
+            if hash_failure:
+                raise RuntimeError("fixture hash failure")
+            return _fh_digest(*args,**kwargs)
+        fake_torch=_FHNamespace(Tensor=_FHTensor,bfloat16="torch.bfloat16",float32="torch.float32",
+            int32="int32",contiguous_format="contiguous",zeros=allocate,empty=allocate,tensor=flag,
+            cuda=_FHNamespace(mem_get_info=lambda _d:(free_bytes,32*2**30),
+                memory_reserved=lambda _d:0,memory_allocated=lambda _d:0))
+        namespace={"torch":fake_torch,"types":_FHNamespace(SimpleNamespace=_FHNamespace),
+            "dist":_FHNamespace(all_reduce=reduce,all_gather_into_tensor=gather,ReduceOp=_FHNamespace(MIN="MIN")),
+            "logging":_FHNamespace(info=lambda *args:self.logs.append(args)),"json":_fh_json,
+            "streamed_tensor_sha256":digest}
+        wanted={"full_head_budget","_full_head_vote","full_head_probe","full_head_summary"}
+        source=_fh_source(); tree=_fh_ast.parse(source.read_text())
+        nodes=[n for n in tree.body if isinstance(n,_fh_ast.FunctionDef) and n.name in wanted]
+        assert {n.name for n in nodes}==wanted
+        exec(compile(_fh_ast.Module(body=nodes,type_ignores=[]),str(source),"exec"),namespace)
+        self.ns,self.dit=namespace,_FHNamespace(final_layer=Head())
+
+    def run(self):
+        return self.ns["full_head_probe"](self.dit,self.h,self.t_emb,self.video_seg,self.audio_seg,
+            self.sigma,self.sigmas,self.shifts,self.ctx)
+
+    def packet(self,record):
+        full=_FHTensor((45167,5376),"torch.bfloat16",values=range(1,45168))
+        windows=[_fh_digest(full,tensor_global_start=0,global_start=a,global_stop=b)
+            for a,b in ((0,22584),(22584,45167))]
+        return {"start":self.ctx.start,"stop":self.ctx.stop,"full_head":record,
+            "full_hashes":{"block49.post":[windows[self.ctx.rank]]}}, {"full_hashes":{"block49.post":windows}}
+
+
+class FullHeadProbeTests(_fh_unittest.TestCase):
+    def test_bf16_full_sequence_original_segments_and_global_crop_offsets(self):
+        packets=[]
+        for rank in (0,1):
+            h=_FHHarness(rank=rank); video,audio,record=h.run()
+            self.assertEqual(h.allocations,[((22584,5376),"torch.bfloat16"),((45168,5376),"torch.bfloat16")])
+            self.assertEqual((h.gather_calls,h.head_calls,h.votes),(1,1,[1,1]))
+            for output,seg in ((video,h.video_seg),(audio,h.audio_seg)):
+                lo,hi=max(seg[0],h.ctx.start),min(seg[1],h.ctx.stop)
+                self.assertEqual(output.rows,list(range(lo+1,hi+1)) if hi>lo else [])
+                self.assertEqual(output.dtype,"torch.float32")
+            self.assertTrue(all(ref() is None for ref in h.buffer_refs+h.full_output_refs))
+            self.assertIsNone(h.full_h_ref())
+            packet,native=h.packet(record); packets.append(packet)
+            _fh_json.dumps(record,allow_nan=False)
+        self.assertEqual(len(h.ns["full_head_summary"](packets,native)),2)
+
+    def test_memory_or_allocation_failure_votes_before_tensor_collective(self):
+        for options in ({"free_bytes":1},{"allocation_failure":1},{"allocation_failure":2},{"peer_votes":(False,True)}):
+            with self.subTest(options=options):
+                h=_FHHarness(**options)
+                with self.assertRaisesRegex(RuntimeError,"diagnostic rejected"):
+                    h.run()
+                self.assertEqual((h.gather_calls,h.head_calls),(0,0))
+                self.assertEqual(h.votes,[1] if "peer_votes" in options else [0])
+                self.assertTrue(all(ref() is None for ref in h.buffer_refs))
+
+    def test_hash_head_output_and_peer_failures_reject_before_output_gathers(self):
+        for options in ({"hash_failure":True},{"head_failure":True},{"bad_output":True},{"peer_votes":(True,False)}):
+            with self.subTest(options=options):
+                h=_FHHarness(**options)
+                with self.assertRaisesRegex(RuntimeError,"diagnostic rejected"):
+                    h.run()
+                self.assertEqual(h.gather_calls,1)
+                self.assertEqual(h.votes,[1,1] if "peer_votes" in options else [1,0])
+                self.assertTrue(all(ref() is None for ref in h.buffer_refs+h.full_output_refs))
+                self.assertNotIn("private_head_exception",repr(h.logs))
+
+    def test_wrong_dtype_device_scope_or_segments_never_enter_gather(self):
+        for mutation in ("dtype","device","world","overlap","missing_sigma"):
+            h=_FHHarness()
+            if mutation=="dtype": h.h.dtype="torch.float32"
+            elif mutation=="device": h.h.device.index=1
+            elif mutation=="world": h.ctx.world=1
+            elif mutation=="overlap": h.audio_seg=(8000,9600,h.audio_row)
+            else: h.sigmas=None
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(RuntimeError,"diagnostic rejected"):
+                h.run()
+            self.assertEqual((h.gather_calls,h.head_calls,h.votes),(0,0,[0]))
+
+    def test_summary_rejects_hash_budget_segment_shape_and_native_intervention(self):
+        packets=[]
+        for rank in (0,1):
+            h=_FHHarness(rank=rank); _,_,record=h.run(); packet,native=h.packet(record); packets.append(packet)
+        summary=h.ns["full_head_summary"]
+        for mutation in ("hash","budget","memory","segment","shape","native","count"):
+            altered,reference=_fh_copy.deepcopy((packets,native));row=altered[0]["full_head"]
+            if mutation=="hash": row["full_h_windows"][1]["sha256"]="0"*64
+            elif mutation=="budget": row["budget"]["required_free_bytes"]-=1
+            elif mutation=="memory": row["memory"]["free_bytes"]=1
+            elif mutation=="segment": row["global_segments"]["video"][0]+=1
+            elif mutation=="shape": row["local_output_shapes"]["audio"][0]+=1
+            elif mutation=="native": reference["full_head"]={}
+            else: row["total_ballot_count"]=1
+            with self.subTest(mutation=mutation),self.assertRaises(RuntimeError): summary(altered,reference)
+
 
 
 

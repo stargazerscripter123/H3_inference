@@ -134,9 +134,9 @@ def configuration(root: Path, gpu: int | None = None, input_dir: str | None = No
                       sp_contract_sha256=sha256(HERE.parent / "sp-node-contract.json"))
     if instance == "sp2" and sp_verify:
         # Native DynamicVRAM headroom only for the first-forward diagnostic.
-        # ComfyUI converts this GiB value using 1024**3; replay keeps its own
-        # unchanged 1 GiB physical-free guard inside the original cast context.
-        config["diagnostic_vram_headroom_gib"] = 2.0
+        # ComfyUI converts this GiB value using 1024**3. Each diagnostic keeps
+        # its independent physical-free guard; this setting does not relax it.
+        config["diagnostic_vram_headroom_gib"] = 4.0
     return config
 
 

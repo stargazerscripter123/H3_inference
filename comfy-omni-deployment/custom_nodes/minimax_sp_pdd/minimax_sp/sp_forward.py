@@ -930,6 +930,7 @@ class Block0Trace:
         self.entered = False
         self.replay = None
         self.all_out_full_m = None
+        self.full_head = None
 
     def _capture(self, point, tensor):
         try:
@@ -1017,7 +1018,8 @@ class Block0Trace:
                 "head_errors": list(self.head_errors), "full_hashes": self.full_hashes,
                 "hash_errors": list(self.hash_errors), "projection_hashes": self.projection_hashes,
                 "projection_replay": None if self.replay is None else self.replay.packet(),
-                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet()}
+                "all_out_full_m": None if self.all_out_full_m is None else self.all_out_full_m.packet(),
+                "full_head": self.full_head}
 
     def capture_head_metadata(self, final_layer):
         try:
@@ -1166,6 +1168,188 @@ def head_metadata_summary(packets, native):
                            "scope": "stored_runtime_metadata", "execution_weight_verified": False, **head})
     return result
 # END reviewed block0 diagnostic trace
+
+# BEGIN reviewed full-sequence FinalLayer diagnostic
+FULL_HEAD_ERROR_CODES = ("full_head_scope_invalid", "full_head_memory_insufficient",
+                         "full_head_preparation_failed", "full_head_execution_failed", "full_head_peer_rejected")
+
+
+def full_head_budget(video_seg, audio_seg, ctx):
+    """Conservative allocation model, not an allocator/backend peak guarantee."""
+    widths = (96, 32)
+    segments = (video_seg, audio_seg)
+    rows = [seg[1] - seg[0] for seg in segments]
+    crops = [max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start)) for seg in segments]
+    gather_bytes = 45168 * 5376 * 2
+    send_bytes = 22584 * 5376 * 2
+    modulation_workspace_bytes = max(rows) * 5376 * 12
+    head_weight_bytes = (3072 + 1024) * 5376 * 4
+    output_bytes = sum(n * w * 4 for n, w in zip(rows, widths))
+    crop_bytes = sum(n * w * 4 for n, w in zip(crops, widths))
+    reserve_bytes = 256 * 1024 * 1024
+    # The send buffer is released before the original FinalLayer executes.
+    gather_phase_bytes = gather_bytes + send_bytes
+    head_phase_bytes = (gather_bytes + modulation_workspace_bytes + head_weight_bytes
+                        + output_bytes + crop_bytes)
+    required = max(1024 * 1024 * 1024, max(gather_phase_bytes, head_phase_bytes) + reserve_bytes)
+    return {"gather_bytes": gather_bytes, "send_bytes": send_bytes,
+            "modulation_workspace_bytes": modulation_workspace_bytes, "head_weight_bytes": head_weight_bytes,
+            "output_bytes": output_bytes, "crop_bytes": crop_bytes, "reserve_bytes": reserve_bytes,
+            "gather_phase_bytes": gather_phase_bytes, "head_phase_bytes": head_phase_bytes,
+            "required_free_bytes": required}
+
+
+def _full_head_vote(ctx, success, phase, code, memory, budget):
+    flag = torch.tensor([int(success)], dtype=torch.int32, device="cuda:0")
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=ctx.group)
+    if not bool(flag.item()):
+        if success:
+            code = "full_head_peer_rejected"
+        logging.info("[minimax_sp][full_head_error] %s", json.dumps(
+            {"schema_version": 1, "rank": ctx.rank, "phase": phase, "code": code,
+             "memory": memory, "budget": budget, "formal_eligible": False},
+            sort_keys=True, allow_nan=False))
+        raise RuntimeError("MiniMax SP full-head diagnostic rejected")
+
+
+def full_head_probe(dit, h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts, ctx):
+    """One exact native FinalLayer call per rank, on original-dtype global h.
+
+    Local preparation errors vote before the data collective. Local hash/head/
+    crop errors vote after it and before the existing output gathers. Collective
+    transport failures still rely on the existing process-group timeout/cleanup.
+    Neither native nor world1 installs or calls this diagnostic helper.
+    """
+    send = gathered = full_h = v_full = a_full = v_local = a_local = None
+    memory = budget = None
+    code = "full_head_scope_invalid"
+    prepared = False
+    try:
+        if (ctx.world != 2 or ctx.rank not in (0, 1) or ctx.seq_len != 45167
+                or list(ctx.splits) != [22584, 22583]
+                or (ctx.start, ctx.stop, ctx.local) != ((0, 22584, 22584) if ctx.rank == 0 else (22584, 45167, 22583))
+                or not isinstance(h, torch.Tensor) or h.dtype != torch.bfloat16
+                or tuple(h.shape) != (ctx.local, 5376) or h.device.type != "cuda" or h.device.index != 0
+                or h.requires_grad or not h.is_contiguous()
+                or sample_sigmas is None):
+            raise RuntimeError("full_head_scope_invalid")
+        for seg in (video_seg, audio_seg):
+            if (len(seg) != 3 or type(seg[0]) is not int or type(seg[1]) is not int
+                    or not 0 <= seg[0] < seg[1] <= ctx.seq_len):
+                raise RuntimeError("full_head_scope_invalid")
+        if (audio_seg[1] != video_seg[0] or video_seg[1] != ctx.seq_len
+                or dit.final_layer.video_dim != 96):
+            raise RuntimeError("full_head_scope_invalid")
+        budget = full_head_budget(video_seg, audio_seg, ctx)
+        free, total = torch.cuda.mem_get_info(h.device)
+        memory = {"free_bytes": int(free), "total_bytes": int(total),
+                  "reserved_bytes": int(torch.cuda.memory_reserved(h.device)),
+                  "allocated_bytes": int(torch.cuda.memory_allocated(h.device))}
+        code = "full_head_memory_insufficient"
+        if free < budget["required_free_bytes"]:
+            raise RuntimeError("full_head_memory_insufficient")
+        code = "full_head_preparation_failed"
+        send = torch.zeros((22584, 5376), dtype=h.dtype, device=h.device)
+        send[:ctx.local].copy_(h)
+        gathered = torch.empty((45168, 5376), dtype=h.dtype, device=h.device)
+        prepared = True
+    except Exception:
+        send = gathered = None
+    _full_head_vote(ctx, prepared, "preparation", code, memory, budget)
+    # Equal-size gather pads only the final global row, never an internal gap.
+    dist.all_gather_into_tensor(gathered, send, group=ctx.group)
+    send = None
+    complete = False
+    record = None
+    try:
+        full_h = gathered[:45167]
+        windows = [streamed_tensor_sha256(full_h, tensor_global_start=0,
+                   global_start=start, global_stop=stop) for start, stop in ((0, 22584), (22584, 45167))]
+        # Pass the original objects, including scalar/per-token modulation rows.
+        v_full, a_full = dit.final_layer(full_h, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts)
+        full_outputs = (v_full, a_full)
+        for output, seg, width in zip(full_outputs, (video_seg, audio_seg), (96, 32)):
+            if (not isinstance(output, torch.Tensor) or output.dtype != torch.float32
+                    or tuple(output.shape) != (seg[1] - seg[0], width)
+                    or output.device != h.device or output.requires_grad):
+                raise RuntimeError("full_head_execution_failed")
+        del output
+        def crop(output, seg):
+            lo, hi = max(seg[0], ctx.start), min(seg[1], ctx.stop)
+            if hi <= lo:
+                return output[:0].clone(memory_format=torch.contiguous_format)
+            return output[lo - seg[0]:hi - seg[0]].clone(memory_format=torch.contiguous_format)
+        v_local, a_local = crop(v_full, video_seg), crop(a_full, audio_seg)
+        record = {"schema_version": 1, "rank": ctx.rank, "world": 2,
+            "scope": "verify_first_forward_full_final_layer", "applied": True, "call_count": 1,
+            "input_dtype": str(h.dtype), "input_shape": [45167, 5376], "padded_shape": [45168, 5376],
+            "splits": list(ctx.splits), "source_window": [ctx.start, ctx.stop],
+            "global_segments": {"video": list(video_seg[:2]), "audio": list(audio_seg[:2])},
+            "segment_row_objects_reused": True, "t_emb_object_reused": True,
+            "full_h_windows": windows,
+            "full_output_shapes": {"video": list(v_full.shape), "audio": list(a_full.shape)},
+            "local_output_shapes": {"video": list(v_local.shape), "audio": list(a_local.shape)},
+            "output_dtype": str(v_full.dtype), "memory": memory, "budget": budget,
+            "preparation_ballot_count": 1, "execution_ballot_count": 1, "total_ballot_count": 2,
+            "tensor_gather_count": 1, "formal_eligible": False, "native_oracle_changed": False}
+        complete = True
+    except Exception:
+        v_local = a_local = None
+    finally:
+        # The returned clones do not retain full-h/full-output storage.
+        send = gathered = full_h = v_full = a_full = None
+        full_outputs = None
+    _full_head_vote(ctx, complete, "execution", "full_head_execution_failed", memory, budget)
+    return v_local, a_local, record
+
+
+def full_head_summary(packets, native):
+    if native.get("full_head") is not None or not isinstance(packets, list) or len(packets) != 2:
+        raise RuntimeError("full_head_packet_invalid")
+    records = []
+    for rank, packet in enumerate(packets):
+        row = packet.get("full_head")
+        if (not isinstance(row, dict) or row.get("rank") != rank or row.get("world") != 2
+                or row.get("schema_version") != 1 or row.get("scope") != "verify_first_forward_full_final_layer"
+                or row.get("applied") is not True or row.get("call_count") != 1
+                or row.get("input_dtype") != "torch.bfloat16" or row.get("input_shape") != [45167, 5376]
+                or row.get("padded_shape") != [45168, 5376] or row.get("splits") != [22584, 22583]
+                or row.get("source_window") != [packet["start"], packet["stop"]]
+                or row.get("segment_row_objects_reused") is not True or row.get("t_emb_object_reused") is not True
+                or row.get("output_dtype") != "torch.float32" or row.get("formal_eligible") is not False
+                or row.get("native_oracle_changed") is not False
+                or [row.get(k) for k in ("preparation_ballot_count", "execution_ballot_count", "total_ballot_count", "tensor_gather_count")] != [1, 1, 2, 1]):
+            raise RuntimeError("full_head_packet_invalid")
+        windows = row.get("full_h_windows")
+        if (not isinstance(windows, list) or len(windows) != 2
+                or windows != native["full_hashes"]["block49.post"]
+                or any(windows[r] != packets[r]["full_hashes"]["block49.post"][0] for r in range(2))):
+            raise RuntimeError("full_head_input_hash_mismatch")
+        # Recompute sizes/guard from the recorded global target segments.
+        ctx = types.SimpleNamespace(start=packet["start"], stop=packet["stop"])
+        segments = row.get("global_segments", {})
+        video, audio = segments.get("video", []), segments.get("audio", [])
+        if (set(segments) != {"video", "audio"} or any(len(seg) != 2 or any(type(n) is not int for n in seg)
+                or not 0 <= seg[0] < seg[1] <= 45167 for seg in (video, audio))
+                or audio[1] != video[0] or video[1] != 45167):
+            raise RuntimeError("full_head_segment_invalid")
+        if row.get("budget") != full_head_budget(video, audio, ctx):
+            raise RuntimeError("full_head_budget_invalid")
+        memory = row.get("memory")
+        if (not isinstance(memory, dict) or set(memory) != {"free_bytes", "total_bytes", "reserved_bytes", "allocated_bytes"}
+                or any(type(value) is not int or value < 0 for value in memory.values())
+                or not row["budget"]["required_free_bytes"] <= memory["free_bytes"] <= memory["total_bytes"]):
+            raise RuntimeError("full_head_memory_invalid")
+        for name, seg, width in (("video", video, 96), ("audio", audio, 32)):
+            local_rows = max(0, min(seg[1], ctx.stop) - max(seg[0], ctx.start))
+            if (row.get("full_output_shapes", {}).get(name) != [seg[1] - seg[0], width]
+                    or row.get("local_output_shapes", {}).get(name) != [local_rows, width]):
+                raise RuntimeError("full_head_output_shape_invalid")
+        records.append(row)
+    if records[0]["global_segments"] != records[1]["global_segments"]:
+        raise RuntimeError("full_head_segment_invalid")
+    return records
+# END reviewed full-sequence FinalLayer diagnostic
 
 # BEGIN reviewed SP2 activation amax scope
 _SP_NVFP4_TICKET = ContextVar('minimax_sp_nvfp4_activation_ticket', default=None)
@@ -1714,8 +1898,12 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
         if trace is not None:
             trace.capture_head_metadata(dit.final_layer)
-        v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),
-                                          sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
+        if trace is not None:
+            v_local, a_local, trace.full_head = full_head_probe(dit, h, t_emb, video_seg, audio_seg,
+                sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a), ctx)
+        else:
+            v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),
+                                              sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
 
         v = _gather_rows(v_local, counts_for(video_seg), ctx, v_local.shape[-1], device)
         a = _gather_rows(a_local, counts_for(audio_seg), ctx, a_local.shape[-1], device)
