@@ -51,13 +51,45 @@ BLOCK0_TRACE_REQUEST = "_minimax_sp_block0_trace_request"
 BLOCK0_TRACE_RESULT = "_minimax_sp_block0_trace_result"
 BLOCK0_TRACE_POINTS = tuple(name + suffix for name in
     ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
-    for suffix in (".pre", ".post")) + ("block0.post",)
+    for suffix in (".pre", ".post")) + tuple(f"block{index}.post" for index in range(50))
+HEAD_METADATA_DTYPES = ("torch.float32", "torch.bfloat16", "torch.float16",
+                        "torch.float8_e4m3fn", "torch.float8_e5m2")
+HEAD_METADATA_QUANT = ("nvfp4", "fp8_e4m3fn", "fp8_e5m2", "mxfp8")
+HEAD_METADATA_LAYOUTS = ("TensorCoreNVFP4Layout", "TensorCoreFP8Layout", "TensorCoreMXFP8Layout")
+
+
+def stored_head_metadata(final_layer):
+    """Read attributes only: never materialize/cast/hash a lazy head weight."""
+    def known(value, allowed):
+        return value if value in allowed else "other"
+    result = []
+    for name in ("video_out", "audio_out"):
+        head = getattr(final_layer, name)
+        weight, bias = head.weight, head.bias
+        quant, layout = getattr(head, "quant_format", None), getattr(head, "layout_type", None)
+        result.append({
+            "head": name,
+            "weight_type": known(type(weight).__name__, ("Parameter", "Tensor", "QuantizedTensor")),
+            "weight_dtype": known(str(weight.dtype), HEAD_METADATA_DTYPES),
+            "weight_shape": list(weight.shape),
+            "weight_device_type": known(weight.device.type, ("cpu", "cuda", "meta")),
+            "weight_is_meta": bool(weight.is_meta),
+            "bias_dtype": None if bias is None else known(str(bias.dtype), HEAD_METADATA_DTYPES),
+            "bias_shape": None if bias is None else list(bias.shape),
+            "quant_format": None if quant is None else known(quant, HEAD_METADATA_QUANT),
+            "layout_type": None if layout is None else known(layout, HEAD_METADATA_LAYOUTS),
+            "full_precision_mm": bool(getattr(head, "_full_precision_mm", False)),
+            "has_v": hasattr(head, "_v"), "has_prefetch": hasattr(head, "_prefetch"),
+            "weight_function_count": len(getattr(head, "weight_function", ())),
+            "bias_function_count": len(getattr(head, "bias_function", ())),
+        })
+    return result
 
 
 class Block0Trace:
     """Diagnostic CPU samples only; hooks never change a model result.
 
-    Each point copies seven global rows (all features) per SP rank immediately,
+    Block0 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,
     before native in-place RoPE/residual updates can change those rows. The
     native oracle samples the union of both ranks' rows. No tensor is logged.
     """
@@ -67,6 +99,8 @@ class Block0Trace:
         self.rows = (sorted({start + i * (count - 1) // 6 for i in range(7)})
                      if rows is None and count > 0 else list(rows or []))
         self.entries, self.errors, self.handles = {}, [], []
+        self.head_metadata = None
+        self.head_errors = []
         self.entered = False
 
     def _capture(self, point, tensor):
@@ -97,6 +131,8 @@ class Block0Trace:
             raise RuntimeError("block0_trace_reentry")
         self.entered = True
         try:
+            if len(self.dit.blocks) != 50:
+                raise RuntimeError("layer_trace_requires_50_blocks")
             block = self.dit.blocks[0]
             for name, module in (("attn.qkv_proj", block.attn.qkv_proj),
                                  ("attn.out_proj", block.attn.out_proj),
@@ -107,8 +143,12 @@ class Block0Trace:
                     self._capture(point, output)
                 self.handles.append(module.register_forward_pre_hook(before))
                 self.handles.append(module.register_forward_hook(after))
-            self.handles.append(block.register_forward_hook(
-                lambda _module, _inputs, output: self._capture("block0.post", output)))
+            for index, block in enumerate(self.dit.blocks):
+                self.handles.append(block.register_forward_hook(
+                    lambda _module, _inputs, output, point=f"block{index}.post": self._capture(point, output)))
+            if self.rank == -1:
+                self.handles.append(self.dit.final_layer.register_forward_pre_hook(
+                    lambda module, _inputs: self.capture_head_metadata(module)))
         except Exception as exc:
             self.errors.append(type(exc).__name__)
             self._remove()
@@ -129,7 +169,16 @@ class Block0Trace:
     def packet(self):
         return {"rank": self.rank, "start": self.start, "stop": self.stop,
                 "rows": list(self.rows), "errors": list(self.errors),
-                "entries": self.entries}
+                "entries": self.entries, "head_metadata": self.head_metadata,
+                "head_errors": list(self.head_errors)}
+
+    def capture_head_metadata(self, final_layer):
+        try:
+            if self.head_metadata is not None:
+                raise RuntimeError("head_metadata_duplicate_capture")
+            self.head_metadata = stored_head_metadata(final_layer)
+        except Exception as exc:
+            self.head_errors.append(type(exc).__name__)
 
 
 def block0_trace_rows(packets):
@@ -183,6 +232,33 @@ def block0_trace_summary(packets, native):
                            "max_abs": delta, "relative": delta / denominator,
                            "sp_local_amax": actual["amax"], "sp_global_amax": global_amax,
                            "native_global_amax": expected["amax"]})
+    return result
+
+
+def head_metadata_summary(packets, native):
+    """Six closed-schema records; these are not executed/cast weight values."""
+    result = []
+    expected_keys = {"head", "weight_type", "weight_dtype", "weight_shape", "weight_device_type",
+                     "weight_is_meta", "bias_dtype", "bias_shape", "quant_format", "layout_type",
+                     "full_precision_mm", "has_v", "has_prefetch", "weight_function_count", "bias_function_count"}
+    for packet, phase, rank in [(packets[0], "sp2", 0), (packets[1], "sp2", 1), (native, "native", -1)]:
+        heads = packet.get("head_metadata")
+        if packet.get("rank") != rank or packet.get("head_errors") or not isinstance(heads, list) or len(heads) != 2:
+            raise RuntimeError("head_metadata_packet_invalid")
+        for head, name, width in zip(heads, ("video_out", "audio_out"), (3072, 1024)):
+            if (not isinstance(head, dict) or set(head) != expected_keys or head["head"] != name
+                    or head["weight_shape"] != [width, 5376] or head["bias_shape"] != [width]
+                    or head["weight_type"] not in ("Parameter", "Tensor", "QuantizedTensor", "other")
+                    or head["weight_dtype"] not in (*HEAD_METADATA_DTYPES, "other")
+                    or head["bias_dtype"] not in (*HEAD_METADATA_DTYPES, "other")
+                    or head["weight_device_type"] not in ("cpu", "cuda", "meta", "other")
+                    or head["quant_format"] not in (None, *HEAD_METADATA_QUANT, "other")
+                    or head["layout_type"] not in (None, *HEAD_METADATA_LAYOUTS, "other")
+                    or any(type(head[key]) is not bool for key in ("weight_is_meta", "full_precision_mm", "has_v", "has_prefetch"))
+                    or any(type(head[key]) is not int or head[key] < 0 for key in ("weight_function_count", "bias_function_count"))):
+                raise RuntimeError("head_metadata_fields_invalid")
+            result.append({"schema_version": 1, "phase": phase, "rank": rank,
+                           "scope": "stored_runtime_metadata", "execution_weight_verified": False, **head})
     return result
 # END reviewed block0 diagnostic trace
 
@@ -729,6 +805,8 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
                 return (0, 0, row[:0] if torch.is_tensor(row) else row)
             return (lo-ctx.start, hi-ctx.start, row[lo-a:hi-a] if torch.is_tensor(row) else row)
 
+        if trace is not None:
+            trace.capture_head_metadata(dit.final_layer)
         v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),
                                           sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
 

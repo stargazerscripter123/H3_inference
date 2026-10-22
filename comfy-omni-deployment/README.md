@@ -17,7 +17,9 @@
 
 这是独立单 GPU 部署包，使用重装后的 `popos-5090`、GPU1 和 loopback `127.0.0.1:8188`。截至2026-10-21 UTC，固定环境已安装，三条业务请求各1首推+3warm，共12/12通过执行与完整MP4元数据检查；人工画面、声音和参考一致性验收仍待完成。此状态取代早期“仅本地模拟验证”的描述，不代表服务此后持续运行；查当前状态使用下方controller。本包不会启动或停止FastVideo。
 
-下一条诊断仅在首个验证forward，对block 0的qkv/out_proj/fc1/fc2输入输出及block出口，各rank抽取固定7个全局行（全部feature），与原生同位置比较。内部CPU样本不落盘、不进日志；日志仅含标量误差、有限性与维度。此采样用于定位首次偏差，不证明全层等价；校验失败仍拒绝请求。正式路径不安装trace hook、不增加trace collective，原数值门槛保持不变。
+第五次GPU诊断确认block 0四个投影输入/输出及block出口的18组采样比较均为0误差，完整tensor的amax也相同；最终视频/音频的最大相对误差仍为0.10351562/0.044378698，world1镜像仍为0。该证据只覆盖各rank固定7行的全部feature，不能扩展成全层逐元素相同。
+
+下一条验证诊断保留首层投影采样，并比较全部50层出口，共58点/rank。内部CPU样本不落盘、不进日志；日志仅含标量误差、有限性与维度。此采样用于定位首次偏差，不证明全层等价；校验失败仍拒绝请求。正式路径不安装trace hook、不增加trace collective，原数值门槛保持不变。
 
 ## 固定配方
 
@@ -116,3 +118,5 @@ python3 -m unittest discover -s comfy-omni-deployment/tests -v
 ```
 
 生命周期测试使用模拟进程、信号和HTTP接口，不导入Torch或运行GPU任务；业务客户端测试使用模拟协议、事件与媒体metadata。这些测试的证据范围仍是CPU模拟；本页的12/12 GPU运行结果来自独立业务实测，不由单元测试推断。
+
+最终PDD头的诊断只记录两rank与native的stored运行时类型、dtype和shape等属性，不读取/输出权重值、不额外物化权重。其字段相同不证明实际执行权重相同；`execution_weight_verified=false`。

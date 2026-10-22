@@ -23,9 +23,25 @@ AMAX_REVIEWED_BLOCKS = {'imports': ('# BEGIN reviewed SP2 activation amax import
 AMAX_ORIGINAL_LOOP = '    for i, block in enumerate(dit.blocks):\n        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")\n        transformer_options["block_index"] = i\n        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options)\n'
 
 
+LAYER_TRACE_REVERSE_EDITS = {'sp_forward.py': [(53, 86, '    for suffix in (".pre", ".post")) + tuple(f"block{index}.post" for index in range(50))\nHEAD_METADATA_DTYPES = ("torch.float32", "torch.bfloat16", "torch.float16",\n                        "torch.float8_e4m3fn", "torch.float8_e5m2")\nHEAD_METADATA_QUANT = ("nvfp4", "fp8_e4m3fn", "fp8_e5m2", "mxfp8")\nHEAD_METADATA_LAYOUTS = ("TensorCoreNVFP4Layout", "TensorCoreFP8Layout", "TensorCoreMXFP8Layout")\n\n\ndef stored_head_metadata(final_layer):\n    """Read attributes only: never materialize/cast/hash a lazy head weight."""\n    def known(value, allowed):\n        return value if value in allowed else "other"\n    result = []\n    for name in ("video_out", "audio_out"):\n        head = getattr(final_layer, name)\n        weight, bias = head.weight, head.bias\n        quant, layout = getattr(head, "quant_format", None), getattr(head, "layout_type", None)\n        result.append({\n            "head": name,\n            "weight_type": known(type(weight).__name__, ("Parameter", "Tensor", "QuantizedTensor")),\n            "weight_dtype": known(str(weight.dtype), HEAD_METADATA_DTYPES),\n            "weight_shape": list(weight.shape),\n            "weight_device_type": known(weight.device.type, ("cpu", "cuda", "meta")),\n            "weight_is_meta": bool(weight.is_meta),\n            "bias_dtype": None if bias is None else known(str(bias.dtype), HEAD_METADATA_DTYPES),\n            "bias_shape": None if bias is None else list(bias.shape),\n            "quant_format": None if quant is None else known(quant, HEAD_METADATA_QUANT),\n            "layout_type": None if layout is None else known(layout, HEAD_METADATA_LAYOUTS),\n            "full_precision_mm": bool(getattr(head, "_full_precision_mm", False)),\n            "has_v": hasattr(head, "_v"), "has_prefetch": hasattr(head, "_prefetch"),\n            "weight_function_count": len(getattr(head, "weight_function", ())),\n            "bias_function_count": len(getattr(head, "bias_function", ())),\n        })\n    return result\n', '    for suffix in (".pre", ".post")) + ("block0.post",)\n'), (91, 92, '    Block0 projections plus all 50 block exits copy seven global rows (all features) per SP rank immediately,\n', '    Each point copies seven global rows (all features) per SP rank immediately,\n'), (101, 103, '        self.head_metadata = None\n        self.head_errors = []\n', ''), (133, 135, '            if len(self.dit.blocks) != 50:\n                raise RuntimeError("layer_trace_requires_50_blocks")\n', ''), (145, 151, '            for index, block in enumerate(self.dit.blocks):\n                self.handles.append(block.register_forward_hook(\n                    lambda _module, _inputs, output, point=f"block{index}.post": self._capture(point, output)))\n            if self.rank == -1:\n                self.handles.append(self.dit.final_layer.register_forward_pre_hook(\n                    lambda module, _inputs: self.capture_head_metadata(module)))\n', '            self.handles.append(block.register_forward_hook(\n                lambda _module, _inputs, output: self._capture("block0.post", output)))\n'), (171, 181, '                "entries": self.entries, "head_metadata": self.head_metadata,\n                "head_errors": list(self.head_errors)}\n\n    def capture_head_metadata(self, final_layer):\n        try:\n            if self.head_metadata is not None:\n                raise RuntimeError("head_metadata_duplicate_capture")\n            self.head_metadata = stored_head_metadata(final_layer)\n        except Exception as exc:\n            self.head_errors.append(type(exc).__name__)\n', '                "entries": self.entries}\n'), (234, 261, '    return result\n\n\ndef head_metadata_summary(packets, native):\n    """Six closed-schema records; these are not executed/cast weight values."""\n    result = []\n    expected_keys = {"head", "weight_type", "weight_dtype", "weight_shape", "weight_device_type",\n                     "weight_is_meta", "bias_dtype", "bias_shape", "quant_format", "layout_type",\n                     "full_precision_mm", "has_v", "has_prefetch", "weight_function_count", "bias_function_count"}\n    for packet, phase, rank in [(packets[0], "sp2", 0), (packets[1], "sp2", 1), (native, "native", -1)]:\n        heads = packet.get("head_metadata")\n        if packet.get("rank") != rank or packet.get("head_errors") or not isinstance(heads, list) or len(heads) != 2:\n            raise RuntimeError("head_metadata_packet_invalid")\n        for head, name, width in zip(heads, ("video_out", "audio_out"), (3072, 1024)):\n            if (not isinstance(head, dict) or set(head) != expected_keys or head["head"] != name\n                    or head["weight_shape"] != [width, 5376] or head["bias_shape"] != [width]\n                    or head["weight_type"] not in ("Parameter", "Tensor", "QuantizedTensor", "other")\n                    or head["weight_dtype"] not in (*HEAD_METADATA_DTYPES, "other")\n                    or head["bias_dtype"] not in (*HEAD_METADATA_DTYPES, "other")\n                    or head["weight_device_type"] not in ("cpu", "cuda", "meta", "other")\n                    or head["quant_format"] not in (None, *HEAD_METADATA_QUANT, "other")\n                    or head["layout_type"] not in (None, *HEAD_METADATA_LAYOUTS, "other")\n                    or any(type(head[key]) is not bool for key in ("weight_is_meta", "full_precision_mm", "has_v", "has_prefetch"))\n                    or any(type(head[key]) is not int or head[key] < 0 for key in ("weight_function_count", "bias_function_count"))):\n                raise RuntimeError("head_metadata_fields_invalid")\n            result.append({"schema_version": 1, "phase": phase, "rank": rank,\n                           "scope": "stored_runtime_metadata", "execution_weight_verified": False, **head})\n', ''), (807, 809, '        if trace is not None:\n            trace.capture_head_metadata(dit.final_layer)\n', '')], 'sp_group.py': [(376, 379, '                        head_summaries = spf.head_metadata_summary(packets, native_trace.packet())\n                        for row in head_summaries:\n                            logging.info("[minimax_sp][head_metadata] %s", json.dumps(row, sort_keys=True, allow_nan=False))\n', '')]}
+LAYER_TRACE_PRIOR_SHA = {'sp_forward.py': '191008ba795c38ec50603941a3a3fd64d967e27de0659fecc558aee11e2dcdb0', 'sp_group.py': 'e524cdc22d6e4d9353044a113bc34b433eb0a885a4df6b78e8500ad0dfc70d7f'}
+
+def reverse_layer_trace(source, name='sp_forward.py'):
+    lines=source.splitlines(keepends=True)
+    for lo,hi,after,before in reversed(LAYER_TRACE_REVERSE_EDITS[name]):
+        if ''.join(lines[lo:hi])!=after:
+            raise AssertionError('layer trace reviewed block digest/lines changed')
+        lines[lo:hi]=before.splitlines(keepends=True)
+    source=''.join(lines)
+    if hashlib.sha256(source.encode()).hexdigest()!=LAYER_TRACE_PRIOR_SHA[name]:
+        raise AssertionError('layer trace reviewed block digest differs from deployed block0 source')
+    return source
+
+
 BLOCK0_REVIEWED_BLOCKS = {'class': ('# BEGIN reviewed block0 diagnostic trace\n', '# END reviewed block0 diagnostic trace\n\n', '7ada8a396f9a99192ae927268f808bcf44b425d365ae2fd048a2bd2804387326'), 'scope': ('    # BEGIN reviewed block0 trace scope\n', '    # END reviewed block0 trace scope\n', '0d062e08e33d1df72cc597dfba34d186ca444531f11cab7ed8f2909b2434a26b'), 'gather': ('    # BEGIN reviewed block0 trace gather\n', '    # END reviewed block0 trace gather\n', '7cca78719d17d2ae116fea9feca89bbbd90d6f3fda4a270d68ff063abbfcb2c8')}
 
 def reverse_block0_trace(source):
+    source = reverse_layer_trace(source)
     for start,stop,digest in BLOCK0_REVIEWED_BLOCKS.values():
         if source.count(start)!=1 or source.count(stop)!=1:
             raise AssertionError('block0 trace reviewed markers changed')
@@ -246,6 +262,7 @@ class PDDGatherTests(unittest.TestCase):
         contract = json.loads(CONTRACT.read_text())
         digest = hashlib.sha256(AFTER.read_bytes()).hexdigest()
         self.assertEqual(digest, contract["files"]["minimax_sp/sp_forward.py"])
+        reverse_layer_trace((AFTER.parent / "sp_group.py").read_text(), "sp_group.py")
         self.assertEqual(digest, contract["local_patch"]["patched_sha256"])
 
 
@@ -391,7 +408,7 @@ def parity_fixture(*, verify=True, world2_good=False, mirror_good=True, mirror_e
             BLOCK0_TRACE_REQUEST='_minimax_sp_block0_trace_request', BLOCK0_TRACE_RESULT='_minimax_sp_block0_trace_result',
             block0_trace_rows=Mock(return_value=([0,1],2)),
             Block0Trace=Trace,
-            block0_trace_summary=Mock(return_value=[])),
+            block0_trace_summary=Mock(return_value=[]), head_metadata_summary=Mock(return_value=[])),
         'build_meta':lambda *args:{}, 'tensor_meta':lambda value:None,
         'forward_status':lambda meta:{}, 'validate_forward_status':lambda *args:None,
         'ordered_tensors':lambda *args:[],
@@ -825,18 +842,26 @@ def _b0t_model():
     block = _B0TModule(block_forward)
     block.attn = _B0TNamespace(qkv_proj=modules[0], out_proj=modules[1])
     block.mlp = _B0TNamespace(fc1=modules[2], fc2=modules[3])
-    return _B0TNamespace(blocks=[block]), modules + [block]
+    exits = [_B0TModule() for _ in range(49)]
+    final = _B0TModule()
+    for name, width in (("video_out",3072),("audio_out",1024)):
+        weight = _B0TNamespace(dtype="torch.float32",shape=(width,5376),
+                               device=_B0TNamespace(type="meta"),is_meta=True)
+        bias = _B0TNamespace(dtype="torch.float32",shape=(width,))
+        setattr(final,name,_B0TNamespace(weight=weight,bias=bias))
+    return _B0TNamespace(blocks=[block] + exits,final_layer=final), modules + [block] + exits + [final]
 
 
 def _b0t_load():
     parsed = _b0t_ast.parse(_b0t_source_path().read_text())
-    symbols = {"Block0Trace", "block0_trace_rows", "block0_trace_summary", "sp_block"}
+    symbols = {"Block0Trace", "block0_trace_rows", "block0_trace_summary", "sp_block",
+               "stored_head_metadata", "head_metadata_summary"}
     selected = [node for node in parsed.body if
                 isinstance(node, (_b0t_ast.FunctionDef, _b0t_ast.ClassDef))
                 and node.name in symbols or
                 isinstance(node, _b0t_ast.Assign) and any(
                     isinstance(target, _b0t_ast.Name)
-                    and target.id == "BLOCK0_TRACE_POINTS" for target in node.targets)]
+                    and (target.id == "BLOCK0_TRACE_POINTS" or target.id.startswith("HEAD_METADATA_")) for target in node.targets)]
     namespace = {"torch": _B0TNamespace(
         Tensor=_B0TTensor,
         aminmax=lambda tensor: (_B0TTensor(tensor.value.min()),
@@ -859,20 +884,25 @@ class Block0TraceMetadataTests(_b0t_unittest.TestCase):
         with self.api.Block0Trace(model, rank=rank, start=start, stop=stop,
                                   rows=rows) as trace:
             # Exercise actual sp_block AST, including block.__call__ hooks.
-            self.api.sp_block(model.blocks[0], tensor, None, None, None,
-                              _B0TNamespace(), {})
+            for block in model.blocks:
+                tensor = self.api.sp_block(block, tensor, None, None, None,
+                                          _B0TNamespace(), {})
+            if rank == -1:
+                model.final_layer(tensor)
+        if rank != -1:
+            trace.capture_head_metadata(model.final_layer)
         self.assertTrue(all(not module.before and not module.after for module in modules))
         return trace.packet()
 
     def _packets(self):
         packets = [self._packet(0, 0, 10), self._packet(1, 10, 19)]
         rows, total = self.api.block0_trace_rows(packets)
-        return packets, self._packet(0, 0, total, rows)
+        return packets, self._packet(-1, 0, total, rows)
 
     def test_real_sp_block_hook_route_and_global_row_alignment(self):
         packets, native = self._packets()
         result = self.api.block0_trace_summary(packets, native)
-        self.assertEqual(len(result), 18)
+        self.assertEqual(len(result), 116)
         self.assertTrue(all(row["max_abs"] == 0 and row["relative"] == 0 for row in result))
         self.assertTrue(all(row["sampled_rows"] == 7 for row in result))
         self.assertGreater(min(packets[1]["rows"]), max(packets[0]["rows"]))
@@ -931,6 +961,50 @@ class Block0TraceMetadataTests(_b0t_unittest.TestCase):
                          (1, "attn.qkv_proj.post"))
         self.assertEqual(changed[0]["max_abs"], 8)
         self.assertFalse(changed[0]["finite"])
+
+    def test_later_block_exit_difference_and_missing_final_exit_are_localized(self):
+        packets, native = self._packets()
+        packets[1]["entries"]["block37.post"]["samples"].value[0, 0] += 16
+        result = self.api.block0_trace_summary(packets, native)
+        changed = [row for row in result if row["max_abs"] != 0]
+        self.assertEqual([(row["rank"], row["point"], row["max_abs"]) for row in changed],
+                         [(1, "block37.post", 16)])
+        packets[0]["entries"].pop("block49.post")
+        with self.assertRaisesRegex(RuntimeError, 'rank_packet_invalid'):
+            self.api.block0_trace_summary(packets, native)
+
+    def test_late_hook_registration_failure_cleans_all_prior_layer_hooks(self):
+        model, modules = _b0t_model()
+        model.blocks[49].reject_registration = True
+        with self.api.Block0Trace(model, rank=0, start=0, stop=10) as trace:
+            self.assertEqual(trace.packet()["errors"], ["ValueError"])
+            self.assertTrue(all(not module.before and not module.after for module in modules))
+        self.assertEqual(trace.handles, [])
+
+    def test_stored_heads_are_attributes_only_and_six_closed_schema_records(self):
+        packets, native = self._packets()
+        packets[1]["head_metadata"][0]["weight_dtype"] = "torch.bfloat16"
+        result = self.api.head_metadata_summary(packets,native)
+        self.assertEqual(len(result),6)
+        self.assertEqual([(row["phase"],row["rank"],row["head"]) for row in result],
+                         [(phase,rank,head) for phase,rank in (("sp2",0),("sp2",1),("native",-1))
+                          for head in ("video_out","audio_out")])
+        self.assertTrue(all(row["execution_weight_verified"] is False for row in result))
+        self.assertTrue(all(row["scope"] == "stored_runtime_metadata" for row in result))
+        self.assertEqual(result[2]["weight_dtype"],"torch.bfloat16")
+        self.assertNotIn("sha256",_b0t_json.dumps(result,allow_nan=False))
+        # SimpleNamespace fixtures have no tensor math/copy APIs: capture above
+        # would fail if it tried detach/to/cpu/hash or an extra cast context.
+        packets[1]["head_metadata"][0]["weight_type"] = "private_unknown_string"
+        with self.assertRaisesRegex(RuntimeError,'head_metadata_fields_invalid'):
+            self.api.head_metadata_summary(packets,native)
+
+    def test_head_capture_error_preserves_layer_samples_but_rejects_head_evidence(self):
+        packets, native = self._packets()
+        packets[1]["head_errors"] = ["AttributeError"]
+        self.assertEqual(len(self.api.block0_trace_summary(packets,native)),116)
+        with self.assertRaisesRegex(RuntimeError,'head_metadata_packet_invalid'):
+            self.api.head_metadata_summary(packets,native)
 
 
 

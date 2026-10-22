@@ -8,8 +8,8 @@
   "files": {
     "__init__.py": "d0db03767908113dd97ba81093d3d12b598d10c9099b6e6593da2e8930352778",
     "minimax_sp/__init__.py": "9069dcd189b7dab767b405271f3ca01ee3e8b34d9bf66c75000014991a59a635",
-    "minimax_sp/sp_forward.py": "191008ba795c38ec50603941a3a3fd64d967e27de0659fecc558aee11e2dcdb0",
-    "minimax_sp/sp_group.py": "e524cdc22d6e4d9353044a113bc34b433eb0a885a4df6b78e8500ad0dfc70d7f",
+    "minimax_sp/sp_forward.py": "e4bd4a8fb0385639946313ad6f7eb3fe4a79825e90ab715aa37d63186c2aa68c",
+    "minimax_sp/sp_group.py": "e46b6b0062cc376041a4faa3970b1374899f00846c3502651c384fa8f60010df",
     "minimax_sp/sp_patches.py": "730796f6059ef686b92001cc6dad88c38d380e443071b68f3134b276bf95aee1",
     "minimax_sp/sp_worker.py": "ff3c08b95ed03ed951f3744846a46dd0c3537fd1d739b81024b0bcd299a0c9ce",
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
@@ -24,10 +24,10 @@
     "LICENSE": "d2c316d167218d6e6a31ef349f2f19b7f0439a3494a41f5e7a6403bf7c1692f2"
   },
   "local_patch": {
-    "id": "omni-pdd-gather-mirror-amax-and-block0-diagnostic-v5",
+    "id": "omni-pdd-gather-mirror-amax-and-layer-diagnostic-v6",
     "path": "minimax_sp/sp_forward.py",
     "source_sha256": "11a009ff40d4dbf18d965f0da1e86a17cf33379c26bb35bc2f4030c8f9c8adf0",
-    "patched_sha256": "191008ba795c38ec50603941a3a3fd64d967e27de0659fecc558aee11e2dcdb0",
+    "patched_sha256": "e4bd4a8fb0385639946313ad6f7eb3fe4a79825e90ab715aa37d63186c2aa68c",
     "description": "Use the actual returned video/audio tensor width for PDD final all-gather, and use the public all_gather_into_tensor API supported by the installed PyTorch 2.12.0+cu130 runtime. Padding, rank order and float32 gather buffers are unchanged.",
     "changes": [
       "video gather out_dim: dit.final_layer.video_out.out_features -> v_local.shape[-1]",
@@ -35,7 +35,8 @@
       "final row gather API: dist.all_gather_single -> dist.all_gather_into_tensor",
       "world1-only identity collective branches for failed-verification mirror probe; world2 collectives unchanged",
       "For world2 block projections only, synchronize dynamic NVFP4 activation amax across ranks before original quantize; fixed input scales and weight requantization retain native behavior",
-      "Verification only: sample fixed seven global rows per rank around block0 projections and compare to native first forward; no tensor samples written or logged"
+      "Verification only: sample fixed seven global rows per rank around block0 projections and compare to native first forward; no tensor samples written or logged",
+      "Verification only: extend sampled-row diagnostic to all 50 block exits, retaining block0 projection samples"
     ],
     "actual_model_contract": {
       "pdd_steps": 32,
@@ -54,7 +55,7 @@
     "previous_patched_sha256": "6b35d82d2a452eefec8b2c804f23f4cd9235432ce816d2d1a48098e1cfa571da"
   },
   "validation": {
-    "cpu_shape_and_ast_tests": 34,
+    "cpu_shape_and_ast_tests": 38,
     "gpu_tested": false,
     "full_forward_parity_tested": false,
     "full_forward_parity_passed": false,
@@ -63,7 +64,7 @@
       "threshold": 0.001,
       "formal_outputs": 0
     },
-    "scope": "First-forward global-amax GPU diagnostic failed unchanged 1e-3 gate; block0 sampled-row trace candidate awaits GPU validation.",
+    "scope": "Block0 18 sampled comparisons are exact with matching amax; full first-forward SP2 parity still failed unchanged gate. All-layer exit trace candidate awaits GPU validation.",
     "previous_global_amax_gpu_result": {
       "video_relative_max": 0.103515625,
       "audio_relative_max": 0.044378698,
@@ -72,13 +73,23 @@
       "world1_audio_max_abs": 0.0,
       "threshold": 0.001,
       "formal_outputs": 0
+    },
+    "previous_block0_trace_gpu_result": {
+      "sampled_comparisons": 18,
+      "max_abs_all_zero": true,
+      "full_matrix_amax_matching": true,
+      "sampled_rows_per_rank": 7,
+      "video_relative_max": 0.10351562,
+      "audio_relative_max": 0.044378698,
+      "threshold": 0.001,
+      "formal_outputs": 0
     }
   },
   "scope": "Candidate for a separately labelled two-GPU SP diagnostic; no measured speed or full-model equivalence claim.",
   "diagnostic_patch": {
     "path": "minimax_sp/sp_group.py",
     "source_sha256": "77e90229d86d505819ae612ba09d937d43b950683cde24e6770ce47f091e082a",
-    "patched_sha256": "e524cdc22d6e4d9353044a113bc34b433eb0a885a4df6b78e8500ad0dfc70d7f",
+    "patched_sha256": "e46b6b0062cc376041a4faa3970b1374899f00846c3502651c384fa8f60010df",
     "scope": "Existing verify mode logs both streams. On failed SP2/native parity only, run one world1 SP mirror before rejecting with the unchanged 1e-3 threshold. No formal-path extra forward. Verification also logs block0 sampled-row scalar summaries; incomplete trace fails closed. Formal forwards have no trace hooks or extra collective."
   },
   "activation_scale_patch": {
@@ -112,6 +123,71 @@
     "comparison": "same global rows, all features; samples are internal CPU copies; logs contain only scalar summaries and row/shape metadata",
     "limitations": "Sampled rows do not prove full-layer equivalence; out_proj.pre combines qk norm, RoPE, communication and attention.",
     "cleanup": "forward hooks removed in scope finally; samples discarded before failure mirror; caller options never contain trace state",
+    "gpu_tested": true
+  },
+  "layer_exit_diagnostic_patch": {
+    "scope": "verify first SP2 forward only",
+    "points_per_rank": 58,
+    "sampled_rows_per_rank": 7,
+    "block_exits": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49
+    ],
+    "gpu_tested": false,
+    "limitations": "Fixed sampled rows do not prove complete tensor equality; no formal-path trace"
+  },
+  "final_head_metadata_diagnostic": {
+    "scope": "verify mode only, both SP ranks and native oracle",
+    "evidence": "Stored runtime attributes only; no weight values, materialization, full-tensor hashing or extra CastBiasWeightContext",
+    "execution_weight_verified": false,
     "gpu_tested": false
   }
 }

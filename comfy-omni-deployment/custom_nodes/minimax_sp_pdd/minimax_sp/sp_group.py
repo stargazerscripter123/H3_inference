@@ -374,6 +374,9 @@ class SPGroup:
                         summaries = spf.block0_trace_summary(packets, native_trace.packet())
                         for row in summaries:
                             logging.info("[minimax_sp][block0_trace] %s", json.dumps(row, sort_keys=True, allow_nan=False))
+                        head_summaries = spf.head_metadata_summary(packets, native_trace.packet())
+                        for row in head_summaries:
+                            logging.info("[minimax_sp][head_metadata] %s", json.dumps(row, sort_keys=True, allow_nan=False))
                     except Exception as exc:
                         trace_error = type(exc).__name__
                 if trace_error is not None:
